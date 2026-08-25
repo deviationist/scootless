@@ -1,0 +1,6 @@
+# Personal settings - never commit these
+.env
+config.json
+
+__pycache__/
+*.pyc
