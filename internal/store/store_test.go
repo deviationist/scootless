@@ -334,3 +334,99 @@ func TestEvents(t *testing.T) {
 		t.Errorf("Events = %+v", ev)
 	}
 }
+
+// --- outage detection ------------------------------------------------------
+
+func recordNearestAt(t *testing.T, s *Store, at time.Time, op string, dist *int) {
+	t.Helper()
+	if err := s.RecordNearest(context.Background(), "home", at,
+		Nearest{Operator: op, At: at, DistanceM: dist}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func intp(v int) *int { return &v }
+
+func TestDarkOperatorsFlagsAnOperatorThatStopsPublishing(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	testFence(t, s)
+	now := time.Unix(1787652000, 0).UTC()
+
+	// Voi was publishing plenty, then stopped. Bolt is unaffected.
+	recordNearestAt(t, s, now.Add(-time.Hour), "voi", intp(80))
+	recordNearestAt(t, s, now.Add(-30*time.Minute), "voi", intp(90))
+	recordNearestAt(t, s, now, "voi", nil)
+	recordNearestAt(t, s, now, "bolt", intp(50))
+
+	dark, err := s.DarkOperators(ctx, "home", now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dark) != 1 || dark[0] != "voi" {
+		t.Errorf("dark = %v, want [voi]", dark)
+	}
+}
+
+// Dott has no vehicles in Oslo and never has. That is not a fault, and
+// reporting it as one every twenty seconds would make the signal worthless.
+func TestDarkOperatorsIgnoresAnOperatorThatNeverServedThisPlace(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	testFence(t, s)
+	now := time.Unix(1787652000, 0).UTC()
+
+	recordNearestAt(t, s, now.Add(-time.Hour), "dott", nil)
+	recordNearestAt(t, s, now, "dott", nil)
+	recordNearestAt(t, s, now, "bolt", intp(50))
+
+	dark, err := s.DarkOperators(ctx, "home", now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dark) != 0 {
+		t.Errorf("dark = %v, want none - dott simply does not operate here", dark)
+	}
+}
+
+// Norway's scooter services close overnight. Everything going quiet at once is
+// a closed service, not several simultaneous faults.
+func TestDarkOperatorsStaysSilentWhenEveryoneIsQuiet(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	testFence(t, s)
+	now := time.Unix(1787652000, 0).UTC()
+
+	for _, op := range []string{"ryde", "voi", "bolt"} {
+		recordNearestAt(t, s, now.Add(-time.Hour), op, intp(60))
+		recordNearestAt(t, s, now, op, nil)
+	}
+	dark, err := s.DarkOperators(ctx, "home", now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dark) != 0 {
+		t.Errorf("dark = %v, want none during a service-wide shutdown", dark)
+	}
+}
+
+func TestDarkOperatorsForgetsStaleHistory(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	testFence(t, s)
+	now := time.Unix(1787652000, 0).UTC()
+
+	// Present yesterday, absent since. Beyond the lookback this is an
+	// operator that has left, not one that broke a moment ago.
+	recordNearestAt(t, s, now.Add(-24*time.Hour), "voi", intp(70))
+	recordNearestAt(t, s, now, "voi", nil)
+	recordNearestAt(t, s, now, "bolt", intp(50))
+
+	dark, err := s.DarkOperators(ctx, "home", now, 6*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dark) != 0 {
+		t.Errorf("dark = %v, want none once the history is stale", dark)
+	}
+}

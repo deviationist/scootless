@@ -636,6 +636,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	dark, err := s.Store.DarkOperators(ctx, fenceID, s.now(), 0)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 
 	type nearestJSON struct {
 		DistanceM *int      `json:"distance_m"`
@@ -656,12 +661,19 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	shown := make([]string, 0, len(dark))
+	for _, d := range dark {
+		if len(want) == 0 || contains(want, d) {
+			shown = append(shown, d)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"fence":   fenceOf(f),
-		"at":      at,
-		"counts":  outCounts,
-		"nearest": outNearest,
-		"summary": summarise(want, counts, nearest),
+		"fence":     fenceOf(f),
+		"at":        at,
+		"counts":    outCounts,
+		"nearest":   outNearest,
+		"feed_dark": shown,
+		"summary":   summarise(want, counts, nearest, shown),
 	})
 }
 
@@ -670,7 +682,8 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 //
 // Operators that are present come first, because an available scooter beats
 // any distance; the rest follow in order of how far you would have to walk.
-func summarise(want []string, counts map[string]int, nearest map[string]store.Nearest) string {
+func summarise(want []string, counts map[string]int, nearest map[string]store.Nearest,
+	dark []string) string {
 	type entry struct {
 		text  string
 		here  bool
@@ -695,10 +708,14 @@ func summarise(want []string, counts map[string]int, nearest map[string]store.Ne
 			continue
 		}
 		if near.DistanceM == nil {
-			entries = append(entries, entry{
-				text:  fmt.Sprintf("no %s nearby", o.Name),
-				order: math.Inf(1),
-			})
+			// Saying "no Voi nearby" when Voi has simply stopped publishing
+			// states a fact we do not have. The distinction matters: one is a
+			// reason to walk further, the other is a reason to open the app.
+			text := fmt.Sprintf("no %s nearby", o.Name)
+			if contains(dark, o.Key) {
+				text = fmt.Sprintf("%s feed is down - unknown", o.Name)
+			}
+			entries = append(entries, entry{text: text, order: math.Inf(1)})
 			continue
 		}
 		entries = append(entries, entry{

@@ -632,3 +632,99 @@ func TestCoalescedQueryDistancesAreRebasedPerFence(t *testing.T) {
 		t.Errorf("distance from work = %d m, want ~0 - it is sitting on the fence", *n.DistanceM)
 	}
 }
+
+// darkHarness answers per-operator probes distinctly, so a tick can be run
+// against a world where one operator's feed has stopped and another's has not.
+type darkFetcher struct {
+	inFence []entur.Vehicle
+	beyond  map[string][]entur.Vehicle
+}
+
+func (f *darkFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error) {
+	if len(q.OperatorKeys) == 1 {
+		vs := f.beyond[q.OperatorKeys[0]]
+		return &entur.Result{Vehicles: vs, Returned: len(vs)}, nil
+	}
+	return &entur.Result{Vehicles: f.inFence, Returned: len(f.inFence)}, nil
+}
+
+// newDarkHarness builds a world where voi was publishing an hour ago and has
+// since gone silent, while bolt is healthy.
+func newDarkHarness(t *testing.T) (*Poller, *store.Store, *[]Notification) {
+	t.Helper()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	if err := st.SaveFence(ctx, store.Fence{ID: "home", Name: "home", At: home, RadiusM: 150}); err != nil {
+		t.Fatal(err)
+	}
+	d := 80
+	if err := st.RecordNearest(ctx, "home", t0.Add(-time.Hour),
+		store.Nearest{Operator: "voi", At: t0.Add(-time.Hour), DistanceM: &d}); err != nil {
+		t.Fatal(err)
+	}
+	sent := &[]Notification{}
+	p := &Poller{
+		Client: &darkFetcher{beyond: map[string][]entur.Vehicle{
+			// bolt is alive, 900 m away; voi returns nothing at all.
+			"bolt": {vehicle("b", "bolt", 900, 20000)},
+		}},
+		Store: st,
+		Sink: SinkFunc(func(ctx context.Context, n Notification) error {
+			*sent = append(*sent, n)
+			return nil
+		}),
+	}
+	return p, st, sent
+}
+
+func scarcityWatch(id string, ops []string) *store.Watch {
+	return &store.Watch{
+		ID: id, Device: "phone", Kind: store.KindScarcity, FenceID: "home",
+		OperatorKeys: ops, Threshold: 2,
+		CreatedAt: t0, ExpiresAt: t0.Add(time.Hour),
+	}
+}
+
+// A dark feed reports zero of everything, which is exactly the scarcity alarm
+// condition. Firing on it would alarm on a fiction.
+func TestScarcityWatchIsHeldBackWhenTheOperatorFeedIsDark(t *testing.T) {
+	ctx := context.Background()
+	p, st, sent := newDarkHarness(t)
+	if err := st.CreateWatch(ctx, scarcityWatch("s1", []string{"voi"})); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := p.Tick(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Dark) == 0 {
+		t.Fatalf("voi was not detected as dark; Dark = %v", rep.Dark)
+	}
+	if len(rep.Fired) != 0 {
+		t.Errorf("scarcity watch fired on a dark feed: %v", rep.Fired)
+	}
+	if len(*sent) != 0 {
+		t.Errorf("notified on a dark feed")
+	}
+}
+
+// A healthy operator's watch must not be suppressed because a different
+// operator is having a bad day.
+func TestScarcityWatchStillFiresForAHealthyOperator(t *testing.T) {
+	ctx := context.Background()
+	p, st, _ := newDarkHarness(t)
+	if err := st.CreateWatch(ctx, scarcityWatch("s2", []string{"bolt"})); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := p.Tick(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Fired) != 1 {
+		t.Errorf("Fired = %v, want the healthy operator's watch to fire", rep.Fired)
+	}
+}

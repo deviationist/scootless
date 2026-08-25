@@ -114,6 +114,9 @@ type Report struct {
 
 	// NearestQueries counts the extra one-vehicle lookups this tick made.
 	NearestQueries int
+
+	// Dark lists operators whose feed appears to have stopped publishing.
+	Dark []string
 }
 
 // Run polls until the context is cancelled.
@@ -195,11 +198,21 @@ func (p *Poller) Tick(ctx context.Context, now time.Time) (Report, error) {
 			if err := p.recordNearest(ctx, f, now, inside, &rep); err != nil {
 				return rep, err
 			}
+			// An operator whose feed has stopped reports zero of everything,
+			// which is indistinguishable from scarcity and would fire a
+			// scarcity watch on a fiction.
+			dark, err := p.Store.DarkOperators(ctx, f.ID, now, 0)
+			if err != nil {
+				return rep, fmt.Errorf("checking operator health: %w", err)
+			}
+			if len(dark) > 0 {
+				rep.Dark = append(rep.Dark, dark...)
+			}
 			for _, w := range watches {
 				if w.FenceID != f.ID {
 					continue
 				}
-				fired, err := p.evaluate(ctx, w, f, now, inside)
+				fired, err := p.evaluate(ctx, w, f, now, inside, dark)
 				if err != nil {
 					return rep, err
 				}
@@ -251,7 +264,7 @@ func (p *Poller) recordFence(ctx context.Context, f store.Fence, now time.Time,
 
 // evaluate decides whether one watch should fire, and fires it if so.
 func (p *Poller) evaluate(ctx context.Context, w *store.Watch, f store.Fence,
-	now time.Time, inside []entur.Vehicle) (bool, error) {
+	now time.Time, inside []entur.Vehicle, dark []string) (bool, error) {
 
 	matching := matches(inside, w)
 
@@ -271,6 +284,14 @@ func (p *Poller) evaluate(ctx context.Context, w *store.Watch, f store.Fence,
 			return false, nil
 		}
 	case store.KindScarcity:
+		// A scarcity watch counts absence, so a dark feed looks exactly like
+		// the alarm condition. Refusing to fire is the safe error: a missed
+		// warning costs a walk, a false one costs trust.
+		if blind := darkFor(w, dark); blind != "" {
+			p.log().Warn("scarcity watch held back; operator feed appears dark",
+				"watch", w.ID, "operator", blind)
+			return false, nil
+		}
 		if len(matching) > w.Threshold {
 			return false, nil
 		}
@@ -500,4 +521,23 @@ func nearestOf(vehicles []entur.Vehicle, f store.Fence) (entur.Vehicle, bool) {
 		}
 	}
 	return best, found
+}
+
+// darkFor names an operator the watch depends on whose feed has stopped, if
+// any. A watch with no operator restriction depends on all of them.
+func darkFor(w *store.Watch, dark []string) string {
+	if len(dark) == 0 {
+		return ""
+	}
+	if len(w.OperatorKeys) == 0 {
+		return dark[0]
+	}
+	for _, k := range w.OperatorKeys {
+		for _, d := range dark {
+			if k == d {
+				return d
+			}
+		}
+	}
+	return ""
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"time"
 )
 
@@ -135,4 +136,64 @@ func (s *Store) LatestCounts(ctx context.Context, fenceID string) (map[string]in
 		out[op] = n
 	}
 	return out, time.Unix(at, 0).UTC(), rows.Err()
+}
+
+// DarkOperators reports operators whose feed appears to have stopped, as
+// distinct from operators that simply have no vehicles here.
+//
+// The signature is a transition, not a state: an operator that was publishing
+// vehicles within reach recently and now publishes none. A state-based rule -
+// "nothing within reach while a competitor is busy" - looks convincing and is
+// wrong, because it describes an operator that does not serve this city at all
+// just as well as a broken one. Dott has no vehicles in Oslo and never has;
+// that is not a fault, and reporting it as one every twenty seconds would make
+// the signal worthless.
+//
+// A healthy peer is still required, so that a service-wide shutdown - every
+// operator quiet at once, as happens overnight in Norway - is not misread as
+// several simultaneous faults.
+func (s *Store) DarkOperators(ctx context.Context, fenceID string, now time.Time,
+	lookback time.Duration) ([]string, error) {
+
+	if lookback <= 0 {
+		lookback = 6 * time.Hour
+	}
+	latest, err := s.LatestNearest(ctx, fenceID)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		candidates []string
+		healthy    bool
+	)
+	for op, n := range latest {
+		if n.DistanceM != nil {
+			healthy = true
+			continue
+		}
+		candidates = append(candidates, op)
+	}
+	if !healthy || len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Keep only those that were publishing recently. An operator with no
+	// history of vehicles here is absent, not broken.
+	var dark []string
+	for _, op := range candidates {
+		var seen int
+		err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM nearest
+			WHERE fence_id = ? AND operator = ? AND distance_m IS NOT NULL
+			  AND at >= ?`, fenceID, op, now.Add(-lookback).Unix()).Scan(&seen)
+		if err != nil {
+			return nil, err
+		}
+		if seen > 0 {
+			dark = append(dark, op)
+		}
+	}
+	sort.Strings(dark)
+	return dark, nil
 }
