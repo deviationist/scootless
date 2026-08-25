@@ -198,3 +198,7 @@ use. Identify yourself with `ET-Client-Name`, and don't poll faster than the
 ~20 s below which there is simply nothing new to read.
 
 Not affiliated with Ryde, Voi, Bolt, Dott or Entur.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
