@@ -1,32 +1,48 @@
 # scootless
 
-Are there any scooters left within *x* metres of you — and should you hurry?
+Are there any scooters left within *x* metres of you — and if not, tell me the
+moment one turns up.
 
-A one-shot CLI that answers the question you have before you put your shoes on.
-It covers **Ryde, Voi, Bolt and Dott**, sorts by walking distance, and warns you
-when the count drops low enough that you should claim one now rather than after
-your coffee.
+It covers **Ryde, Voi, Bolt and Dott** through Norway's open mobility data, and
+answers the two questions that actually come up:
+
+**Before you put your shoes on** — *is there anything out there?* One shot, no
+state, answered in under a second.
 
 ```
-$ scootless -r 100 -t 3
-3 rentable scooters within 100 m of home
-  SCARCE - at or below your threshold of 3. Grab one before it's gone.
-    61 m W <   36.2 km  Ryde
-    80 m SE\   12.6 km 27%  Bolt
-    97 m N ^   25.4 km  Voi
-
 $ scootless
 0 rentable scooters within 100 m of home
   You are scootless. Widen the radius with -r, or try -o all.
 ```
 
-It exists because by mid-morning an entire city block can be stripped of one
-operator's scooters while the others are still standing there. If your
-subscription only pays for one brand, the count that matters is that brand's.
+**When there is nothing out there** — you have already checked all three apps,
+the block is empty, and standing there refreshing them is not a plan. Arm a
+watch and put the phone away:
 
-## Install
+```
+$ curl -XPOST localhost:8099/api/v1/watches \
+    -d '{"kind":"appearance","fence_id":"home","operators":["ryde"]}'
+```
 
-Python 3.8+, standard library only. No dependencies, no build step.
+The next scooter to appear inside your radius sends a notification you can tap
+straight into the operator's app, on that exact vehicle. That second question is
+the one the operators' own apps cannot answer, and it is why this exists: by
+mid-morning a whole block can be stripped of one operator while the others are
+still standing there, and if your subscription only pays for one brand, that
+brand's count is the only one that matters.
+
+## The two pieces
+
+| | |
+|---|---|
+| **`scootless.py`** | The one-shot CLI. Python 3.8+, standard library only, no build step. Answers the first question and nothing else. |
+| **`scootlessd`** | The daemon. Polls, keeps history, holds watches, and notifies. Go, single static binary, SQLite. |
+
+They are independent: the CLI needs nothing running, and the daemon needs no CLI.
+
+## Quick start
+
+The CLI:
 
 ```bash
 git clone https://github.com/deviationist/scootless.git
@@ -35,44 +51,39 @@ cp .env.example .env      # then edit .env
 ./scootless.py
 ```
 
-Optionally put it on your `PATH`:
+The daemon:
 
 ```bash
-ln -s "$PWD/scootless.py" ~/.local/bin/scootless
+make build
+./bin/scootlessd --once   # one poll, then exit
+./bin/scootlessd          # poll continuously, serve the API
 ```
+
+`.env` is gitignored. Your home coordinates never enter the repository, and the
+daemon logs them only under `-v`.
 
 ## Configuration
 
-Settings come from three places. Later ones win:
+Settings come from, in increasing order of precedence: built-in defaults,
+`~/.config/scootless/config.json` (written by `--save-location`, CLI only),
+`.env` or `SCOOTLESS_*` environment variables, and command-line flags.
 
-1. built-in defaults
-2. `~/.config/scootless/config.json` — written by `--save-location`
-3. `.env` in the project directory, or `SCOOTLESS_*` environment variables
-4. command-line flags
-
-`.env` is gitignored. Your home coordinates never enter the repository.
+Every setting is documented in [`.env.example`](.env.example). The ones you
+need to start:
 
 | Variable | Meaning |
 |---|---|
 | `SCOOTLESS_LAT` / `SCOOTLESS_LON` | Where you're standing, decimal degrees |
 | `SCOOTLESS_RADIUS` | Search radius in metres |
-| `SCOOTLESS_THRESHOLD` | Warn at or below this many |
 | `SCOOTLESS_OPERATOR` | `ryde`, `voi`, `bolt`, `dott`, `all`, or a subset |
-| `SCOOTLESS_CLIENT_NAME` | Sent as `ET-Client-Name` |
+| `SCOOTLESS_NTFY_SERVER` / `_TOPIC` | Where notifications go |
 
-If you'd rather not use `.env`, save a location instead:
-
-```bash
-scootless --save-location home 59.9139,10.7522
-```
-
-## Usage
+## The CLI
 
 ```bash
 scootless                        # your configured defaults
 scootless -r 250 -t 5            # wider radius, higher alarm
 scootless -o ryde                # only the brand you subscribe to
-scootless -o voi,bolt            # only the ones you name
 scootless --min-battery-km 10    # ignore nearly-flat scooters
 scootless --json                 # machine-readable
 scootless --quiet                # just the number
@@ -93,10 +104,81 @@ Built for cron and shell pipelines:
 scootless --quiet >/dev/null || echo "running out!" | your-notifier
 ```
 
-Running it periodically on an always-on machine turns it from a question you
-ask into a warning you receive. A `systemd` timer, a cron entry, or any
-scheduler that can read an exit code will do; the tool holds no state, so
-running it every few minutes costs nothing.
+## The daemon
+
+### Watches
+
+A **watch** is a standing request to be told when something changes.
+
+- **appearance** — fire when a vehicle turns up that was not there when the
+  watch was armed. This is the *"I need a scooter"* case. It is an edge trigger
+  over a baseline captured at arm time, so arming it while one is already
+  parked there does not fire instantly.
+- **scarcity** — fire when the count drops to a threshold or below. Planning,
+  rather than rescue.
+
+Both fire once and disarm by default, and both carry a TTL. Nothing polls
+forever.
+
+### HTTP API
+
+Binds to `127.0.0.1:8099`. Set `SCOOTLESS_API_TOKEN` to require a bearer token
+before exposing it anywhere else.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/vehicles` | the one-shot ask — `lat`, `lon`, `radius`, `operators` |
+| `GET` | `/api/v1/status` | counts *and* nearest-per-operator for a fence, with a human summary |
+| `GET`/`POST` | `/api/v1/fences` | places being watched |
+| `GET`/`POST` | `/api/v1/watches` | list, or arm one |
+| `DELETE` | `/api/v1/watches/{id}` | cancel |
+| `GET` | `/api/v1/history` | counts over time |
+| `GET` | `/api/v1/arrivals` | when vehicles turned up |
+| `GET` | `/healthz` | liveness |
+
+`/api/v1/status` is the one worth seeing:
+
+```json
+{ "summary": "2 Bolt available, 173 m to nearest Voi, 481 m to nearest Ryde" }
+```
+
+A bare zero is a bad answer. "None here" and "none within five kilometres" call
+for different decisions, and so does "none here, but one 173 m away" — which is
+a walk, not a defeat.
+
+### History
+
+Every poll is recorded, which answers better questions than any alarm does:
+
+- **`sample`** — the count per operator per tick. *When does the block empty,
+  and when does it refill?*
+- **`presence`** — one row per continuous stint a vehicle spends inside the
+  fence. *How often does one actually turn up, and how long does it last?*
+- **`nearest`** — how far the closest one was, including when it is outside the
+  fence entirely. *How wide is the drought?*
+
+### Notifications
+
+Fired watches fan out to every configured sink, and a failure in one does not
+stop the others:
+
+- **ntfy** — the hop that reaches a phone. The notification's tap action is the
+  operator's own deep link, so it is one tap from a ride.
+- **MQTT** — a bus rather than a destination, so anything else can subscribe.
+- **the log** — always, so a fired watch is visible even when delivery is not.
+
+With none configured it logs only, which is enough to develop against.
+
+### Running it
+
+```bash
+make install     # build, install the user unit, restart
+make logs
+```
+
+[`deploy/scootlessd.service`](deploy/scootlessd.service) is a systemd user unit.
+Use `make install` rather than restarting by hand — the unit runs a prebuilt
+binary, so a bare restart will happily rerun a stale build.
 
 ## Where the data comes from
 
