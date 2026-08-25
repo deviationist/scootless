@@ -69,3 +69,72 @@ exactly why some operators rotate identifiers. Worth a plain-language report to
 Ryde (raw IMEIs, unauthenticated endpoint) and to Entur (deviceIMEI in a public
 rental_uri) once the unlock test confirms the id linkage. Do not publish
 specifics before the operators can respond.
+
+---
+
+# Update: the identifier is the IMEI, and it is on the public feed
+
+The earlier sections framed this around Ryde's app. The sharper finding is on
+the **public** side, and it settles the question that actually matters —
+*does a vehicle's identifier rotate across trips or across customers?*
+
+## The answer: it cannot rotate
+
+The identifier exposed for a Ryde vehicle is its **IMEI** — the cellular modem's
+hardware serial. That fact does the work:
+
+- **Cross-customer.** The Entur feed is public and account-less. The IMEI is
+  therefore identical for every observer, by construction. There is no customer
+  dimension for it to vary on.
+- **Cross-trip / cross-day.** An IMEI is permanent by physical definition. It
+  does not change when a rental ends or a new rider begins one.
+
+The only residual assumption is that Ryde does not swap a vehicle's physical
+modem or falsify the field — implausible, and the unlock test plus multi-day
+collector data confirm it empirically by following one IMEI through a real
+rental and across days.
+
+## Evidence: the same IMEI in both sources, matched directly
+
+Measured 2026-08-25, joining the app capture to the public feed:
+
+- The public `rydeoslo` GBFS feed carried **4,882 vehicles, and every one
+  (4,882 / 4,882) exposed a `deviceIMEI=` in its `rental_uris`.**
+- **147 of the 157 IMEIs** seen in Ryde's app (`getComScooters` → `redScooters`)
+  were present in that public feed, matched on the full 15-digit IMEI — not just
+  a shared model prefix. The ~10 misses are consistent with normal feed churn in
+  the minutes between the two captures.
+
+So the same permanent hardware identifier appears in both the operator's app API
+and the fully public aggregator feed.
+
+## The UUID is a red herring (but probably also derived)
+
+Entur's vehicle id is a UUIDv3 (deterministic, name-based) and is structured —
+every observed Ryde id begins `ea`, with only two 3-char prefixes fleet-wide —
+which is consistent with it being a hash of the IMEI under a private namespace
+(common namespaces were tested and did not match; a private one cannot be
+brute-forced, so this is suggestive, not proven). It does not matter either way:
+the IMEI itself is in the feed in clear, so the UUID's derivation is irrelevant
+to the exposure.
+
+## What this is, stated precisely
+
+> Entur's public, unauthenticated mobility feed exposes a permanent hardware
+> identifier (the IMEI) for every Ryde scooter. Because an IMEI never changes,
+> anyone can poll the feed and build a persistent movement history of any
+> individual vehicle — origin/destination pairs, dwell times, restock patterns —
+> with no account, no key, and no cooperation from the operator.
+
+**The primary leak is on Entur's surface** (the `deviceIMEI` parameter inside the
+public `rental_uris`), with Ryde as the upstream source of the data. A
+disclosure therefore goes to both.
+
+## The boundary that keeps this a privacy finding, not a how-to
+
+The IMEI enables tracking **vehicles**, not **people**. Going from "vehicle X
+moved A→B" to "person Y took that trip" requires linking the vehicle to a rider,
+which needs data we do not have and must not obtain — a rider's account, a
+survey tied to identity, or correlation against a person's known movements. The
+finding stops at vehicle-level trackability from public data. It should stay
+there.
