@@ -36,6 +36,10 @@ type Config struct {
 	Interval time.Duration
 	HTTPAddr string
 
+	// APIToken, when set, is required as a bearer token on the API. Empty
+	// means the API is open, which is only appropriate on a loopback bind.
+	APIToken string
+
 	MQTTBroker   string
 	MQTTTopic    string
 	MQTTClientID string
@@ -113,6 +117,7 @@ func (c *Config) apply(v map[string]string) error {
 	strVal(v, Prefix+"CLIENT_NAME", &c.ClientName)
 	strVal(v, Prefix+"DB", &c.DBPath)
 	strVal(v, Prefix+"HTTP_ADDR", &c.HTTPAddr)
+	strVal(v, Prefix+"API_TOKEN", &c.APIToken)
 	strVal(v, Prefix+"MQTT_BROKER", &c.MQTTBroker)
 	strVal(v, Prefix+"MQTT_TOPIC", &c.MQTTTopic)
 	strVal(v, Prefix+"MQTT_CLIENT_ID", &c.MQTTClientID)

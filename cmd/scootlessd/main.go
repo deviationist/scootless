@@ -8,14 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/deviationist/scootless/internal/api"
 	"github.com/deviationist/scootless/internal/config"
 	"github.com/deviationist/scootless/internal/entur"
+	"github.com/deviationist/scootless/internal/notify"
 	"github.com/deviationist/scootless/internal/poll"
 	"github.com/deviationist/scootless/internal/store"
 )
@@ -36,6 +39,7 @@ func run() error {
 		dir     = flag.String("config", ".", "directory to read .env from")
 		dbPath  = flag.String("db", "", "override the database path")
 		once    = flag.Bool("once", false, "run a single tick and exit")
+		noHTTP  = flag.Bool("no-http", false, "do not serve the API")
 		verbose = flag.Bool("v", false, "log debug detail, including coordinates")
 	)
 	flag.Parse()
@@ -79,6 +83,10 @@ func run() error {
 		return fmt.Errorf("saving fence: %w", err)
 	}
 
+	client := entur.New(cfg.ClientName)
+	sink, closeSink := buildSink(ctx, cfg, log)
+	defer closeSink()
+
 	// Coordinates are logged only under -v. They are the one genuinely
 	// personal value here, and a daemon's log tends to outlive the intent
 	// behind it.
@@ -91,8 +99,9 @@ func run() error {
 	log.Debug("fence position", "lat", cfg.Home.Lat, "lon", cfg.Home.Lon)
 
 	p := &poll.Poller{
-		Client:   entur.New(cfg.ClientName),
+		Client:   client,
 		Store:    st,
+		Sink:     sink,
 		Interval: cfg.Interval,
 		Log:      log,
 	}
@@ -106,13 +115,64 @@ func run() error {
 		return nil
 	}
 
-	log.Info("polling; press ctrl-c to stop")
+	if !*noHTTP {
+		srv := &http.Server{
+			Addr: cfg.HTTPAddr,
+			Handler: (&api.Server{
+				Store: st, Client: client, Log: log, Token: cfg.APIToken,
+			}).Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			log.Info("serving api", "addr", cfg.HTTPAddr, "authenticated", cfg.APIToken != "")
+			if cfg.APIToken == "" {
+				// Worth saying out loud rather than discovering later: an
+				// unauthenticated API is only safe while it is bound to
+				// loopback or a trusted interface.
+				log.Warn("api has no token; keep it off any public interface " +
+					"(set SCOOTLESS_API_TOKEN)")
+			}
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("api server stopped", "err", err)
+			}
+		}()
+		defer func() {
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			srv.Shutdown(shutdown)
+		}()
+	}
+
+	log.Info("polling; send SIGINT or SIGTERM to stop")
 	err = p.Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		log.Info("stopped")
 		return nil
 	}
 	return err
+}
+
+// buildSink returns the notification sink and a function to release it. With
+// no broker configured the watch machinery still works fully; it just logs,
+// which keeps the feature usable before any messaging exists.
+func buildSink(ctx context.Context, cfg config.Config, log *slog.Logger) (poll.Sink, func()) {
+	if cfg.MQTTBroker == "" {
+		log.Info("no mqtt broker configured; notifications will be logged only")
+		return notify.LogSink{Log: log}, func() {}
+	}
+	m, err := notify.Dial(ctx, notify.Options{
+		Broker: cfg.MQTTBroker, ClientID: cfg.MQTTClientID,
+		Username: cfg.MQTTUsername, Password: cfg.MQTTPassword,
+		Prefix: cfg.MQTTTopic, Log: log,
+	})
+	if err != nil {
+		// A broker that is down must not stop the collector: the history is
+		// still worth recording, and the watch still fires and is recorded.
+		log.Error("connecting to mqtt; falling back to logging", "err", err)
+		return notify.LogSink{Log: log}, func() {}
+	}
+	log.Info("publishing to mqtt", "topic_prefix", cfg.MQTTTopic)
+	return m, m.Close
 }
 
 func logTick(log *slog.Logger, rep poll.Report) {
