@@ -132,43 +132,69 @@ Findings from probing the live API, each of which cost time to discover:
 - **Ryde never populates `currentFuelPercent`** — it is `null` on every one of
   its vehicles, while Voi and Bolt always fill it. For Ryde,
   `currentRangeMeters` is the only battery signal available.
-- **The result set caps at 500.** Exactly 500 back means the list was truncated;
-  `scootless` reports `500+` rather than pretending the number is exact.
+- **The result set caps at 500 — but `count` selects the *nearest* N.** It is
+  not an arbitrary truncation. Asking for 10, 25, 100 and 300 vehicles at a
+  fixed radius returns strictly nested sets — no vehicle in a smaller result
+  was ever missing from a larger one — with the furthest distance growing
+  101 m, 121 m, 194 m, 336 m. The rows come back *unordered*, so you must sort
+  them yourself, but nothing nearer than the furthest row was withheld. Two
+  consequences: hitting the cap never costs you the closest scooter, and a tiny
+  `count` at a wide radius is an exact nearest-vehicle lookup rather than a
+  sample. `scootless` still reports `500+` rather than pretending the total is
+  exact.
 - **`isReserved` appears to be permanently `false`.** An active rental seems to
   remove the vehicle from the feed entirely instead.
 - **The GraphQL endpoint takes raw coordinates**, so it spans city systems
   automatically — you never pick a feed. The per-city GBFS feeds are only needed
   for whole-city snapshots.
+- **Operator coverage is per city, and an absent operator is not an error.**
+  Dott runs in Trondheim but has nothing in Oslo; Bolt is Oslo-only of the
+  cities checked. A valid operator with no vehicles returns an empty list that
+  looks exactly like a wrong ID — which is why `scootless` validates operator
+  keys locally before asking.
 
 ### How fresh is it?
 
-Measured rather than assumed — polling one city every 20 s for three minutes:
+Measured rather than assumed — and the first measurement was wrong, which is
+worth keeping in the open. Sampling **one** operator every 20 s suggested
+`last_updated` advanced in exact 30-second steps. Sampling **all three** Oslo
+operators every 5 s shows it does not: a 20 s cycle aliases a jittery ~30 s
+tick into a suspiciously clean one.
+
+| Operator | advertised `ttl` | measured step |
+|---|---|---|
+| Ryde | 5 s | 27–33 s, mean 30.0 — jitter, not a clock |
+| Voi | 30 s | either ~30 s or ~59 s |
+| Bolt | 300 s | ~312 s |
+
+Pooled step sizes from two independent runs:
 
 ```
-t=   0.3s last_updated=1787646208 n=4741
-t=  20.7s last_updated=1787646208 n=4741 | gone= 0 new= 0 moved= 0
-t=  41.0s last_updated=1787646236 n=4738 | gone=12 new= 9 moved=12
-t=  61.4s last_updated=1787646266 n=4736 | gone=12 new=10 moved=10
-t=  81.7s last_updated=1787646266 n=4736 | gone= 0 new= 0 moved= 0
-t= 102.0s last_updated=1787646297 n=4742 | gone= 4 new=10 moved= 6
-t= 122.7s last_updated=1787646328 n=4736 | gone=13 new= 7 moved=38
-t= 143.0s last_updated=1787646358 n=4742 | gone=11 new=17 moved=30
-t= 163.3s last_updated=1787646358 n=4742 | gone= 0 new= 0 moved= 0
-t= 183.7s last_updated=1787646388 n=4741 | gone=10 new= 9 moved=78
+Ryde  27s #   28s ####   29s ##########   30s ############   31s ##########   32s ####   33s #
+Voi   30s ####  31s ##  32s ##       55s #  58s ###  59s ####  60s ####  61s ###  62s ##
+Bolt  ~312s
 ```
 
-`last_updated` steps in exact 30-second increments (…208, 236, 266, 297, 328,
-358, 388), and every tick carries real churn: roughly 10 vehicles appearing and
-10 disappearing city-wide, with dozens more having moved. Poll on a 20 s cycle
-and you simply see the same snapshot twice.
+Ryde is unimodal around 30 s. Voi is **bimodal**, not noisy: it runs on the same
+30 s grid but publishes only about every third tick, for an effective ~50 s.
+Bolt moves roughly every five minutes, despite advertising a `ttl` of 300 that
+would suggest the same thing far more precisely than it delivers.
 
-This is the same data the operators' own maps draw from, so **polling faster
-than ~30 s gains you nothing.**
+Three things follow. **Each operator runs on its own phase**, so there is no
+single clock to synchronise a poller to — and the GraphQL endpoint exposes no
+timestamp of its own to read one from, only the per-city GBFS feeds do.
+**`ttl` is not the update interval**; Ryde advertises 5 s and moves every 30.
+And **an appearance alert on Bolt can never be responsive**, because the data
+underneath it is five minutes old at worst. That is a property of the feed, not
+of any tool built on it.
+
+Polling every ~20 s catches every Ryde tick without aliasing. Faster than that
+gains nothing at all.
 
 ## Courtesy
 
 This reads a public, openly licensed dataset published for exactly this kind of
 use. Identify yourself with `ET-Client-Name`, and don't poll faster than the
-~30 s at which the data actually changes.
+~20 s below which there is simply nothing new to read.
 
 Not affiliated with Ryde, Voi, Bolt, Dott or Entur.
