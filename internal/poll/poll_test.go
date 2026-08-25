@@ -333,9 +333,14 @@ func TestDistantFencesGetTheirOwnQueries(t *testing.T) {
 	if rep.Queries != 2 {
 		t.Errorf("Queries = %d, want 2 for fences 400 km apart", rep.Queries)
 	}
+	// The cap governs coalesced fence queries. Nearest probes are single
+	// -operator and deliberately wide, but return only a handful of rows.
 	for _, q := range h.fetch.queries {
+		if len(q.OperatorKeys) == 1 {
+			continue
+		}
 		if q.RadiusM > MaxQueryRadiusM {
-			t.Errorf("query radius %d m exceeds the cap", q.RadiusM)
+			t.Errorf("fence query radius %d m exceeds the cap", q.RadiusM)
 		}
 	}
 }
@@ -388,5 +393,242 @@ func TestTickWithNoFencesDoesNothing(t *testing.T) {
 	}
 	if rep.Queries != 0 {
 		t.Errorf("Queries = %d, want 0 with no fences", rep.Queries)
+	}
+}
+
+// --- nearest ---------------------------------------------------------------
+
+// operatorFetcher answers per-operator queries, so the nearest lookup can be
+// exercised without a network.
+type operatorFetcher struct {
+	inFence []entur.Vehicle
+	beyond  map[string][]entur.Vehicle
+	probes  []entur.Query
+}
+
+func (f *operatorFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error) {
+	if len(q.OperatorKeys) == 1 {
+		f.probes = append(f.probes, q)
+		vs := f.beyond[q.OperatorKeys[0]]
+		return &entur.Result{Vehicles: vs, Returned: len(vs)}, nil
+	}
+	return &entur.Result{Vehicles: f.inFence, Returned: len(f.inFence)}, nil
+}
+
+func newNearestHarness(t *testing.T) (*Poller, *operatorFetcher, *store.Store) {
+	t.Helper()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	f := &operatorFetcher{beyond: map[string][]entur.Vehicle{}}
+	p := &Poller{Client: f, Store: st}
+	if err := st.SaveFence(context.Background(), store.Fence{
+		ID: "home", Name: "home", At: home, RadiusM: 150,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return p, f, st
+}
+
+func TestNearestInFenceCostsNoExtraQuery(t *testing.T) {
+	ctx := context.Background()
+	p, f, st := newNearestHarness(t)
+	f.inFence = []entur.Vehicle{
+		vehicle("b1", "bolt", 120, 20000),
+		vehicle("b2", "bolt", 40, 20000), // the closer Bolt
+	}
+	rep, err := p.Tick(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.LatestNearest(ctx, "home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, ok := got["bolt"]
+	if !ok || n.DistanceM == nil {
+		t.Fatalf("no nearest recorded for bolt: %+v", got)
+	}
+	if n.VehicleID != "b2" {
+		t.Errorf("nearest bolt = %q, want the closer one b2", n.VehicleID)
+	}
+	if *n.DistanceM > 45 {
+		t.Errorf("distance = %d m, want ~40", *n.DistanceM)
+	}
+	// Bolt was present, so no probe should have been spent on it.
+	for _, q := range f.probes {
+		if q.OperatorKeys[0] == "bolt" {
+			t.Error("probed for an operator that was already in the fence")
+		}
+	}
+	if rep.NearestQueries == 0 {
+		t.Error("expected probes for the absent operators")
+	}
+}
+
+func TestNearestBeyondTheFenceIsFound(t *testing.T) {
+	ctx := context.Background()
+	p, f, st := newNearestHarness(t)
+	// Nothing in the fence at all, but a Ryde 480 m away.
+	f.beyond["ryde"] = []entur.Vehicle{vehicle("far-ryde", "ryde", 480, 30000)}
+
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.LatestNearest(ctx, "home")
+	n, ok := got["ryde"]
+	if !ok || n.DistanceM == nil {
+		t.Fatalf("nearest ryde not recorded: %+v", got)
+	}
+	if *n.DistanceM < 470 || *n.DistanceM > 490 {
+		t.Errorf("distance = %d m, want ~480", *n.DistanceM)
+	}
+}
+
+// "No Ryde within 5 km" is a different answer from "we did not look", and the
+// distinction has to survive into storage.
+func TestNearestRecordsAbsenceExplicitly(t *testing.T) {
+	ctx := context.Background()
+	p, f, st := newNearestHarness(t)
+	f.beyond["ryde"] = nil
+
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.LatestNearest(ctx, "home")
+	n, ok := got["ryde"]
+	if !ok {
+		t.Fatal("no row recorded for an operator with nothing within reach")
+	}
+	if n.DistanceM != nil {
+		t.Errorf("DistanceM = %v, want nil", *n.DistanceM)
+	}
+}
+
+// The wider lookup is context for a human, not the thing watches depend on,
+// so it runs on its own slower schedule.
+func TestNearestLookupIsRateLimited(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newNearestHarness(t)
+	p.NearestInterval = 2 * time.Minute
+
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	first := len(f.probes)
+	if first == 0 {
+		t.Fatal("no probes on the first tick")
+	}
+	if _, err := p.Tick(ctx, t0.Add(20*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.probes) != first {
+		t.Errorf("probed again after 20s: %d -> %d", first, len(f.probes))
+	}
+	if _, err := p.Tick(ctx, t0.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.probes) == first {
+		t.Error("did not probe again after the interval elapsed")
+	}
+}
+
+func TestNearestCanBeDisabled(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newNearestHarness(t)
+	p.NearestInterval = -1
+
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.probes) != 0 {
+		t.Errorf("probed %d times despite being disabled", len(f.probes))
+	}
+}
+
+// A probe asks for a margin, not exactly one vehicle: the upstream selects the
+// nearest N before we filter out the unrentable, so asking for one and getting
+// a disabled scooter would read as "nothing within 5 km".
+func TestNearestProbeAsksForAMargin(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newNearestHarness(t)
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.probes) == 0 {
+		t.Fatal("no probes made")
+	}
+	for _, q := range f.probes {
+		if q.Limit <= 1 {
+			t.Errorf("probe Limit = %d, want a margin above 1", q.Limit)
+		}
+		if q.RadiusM != DefaultReachM {
+			t.Errorf("probe radius = %d, want %d", q.RadiusM, DefaultReachM)
+		}
+	}
+}
+
+// A failing probe is context lost, not a tick lost - the watches must survive.
+func TestNearestFailureDoesNotFailTheTick(t *testing.T) {
+	ctx := context.Background()
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	if err := st.SaveFence(ctx, store.Fence{
+		ID: "home", Name: "home", At: home, RadiusM: 150,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := &failingProbeFetcher{}
+	p := &Poller{Client: f, Store: st}
+	if _, err := p.Tick(ctx, t0); err != nil {
+		t.Errorf("tick failed because a nearest probe did: %v", err)
+	}
+}
+
+type failingProbeFetcher struct{}
+
+func (f *failingProbeFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error) {
+	if len(q.OperatorKeys) == 1 {
+		return nil, errors.New("probe failed")
+	}
+	return &entur.Result{}, nil
+}
+
+// A coalesced query is centred on a circle covering several fences, so the
+// distances the client computed are relative to that centre. Every fence must
+// see distances measured from itself, or "61 m west" refers to somewhere
+// nobody is standing.
+func TestCoalescedQueryDistancesAreRebasedPerFence(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	if err := h.st.SaveFence(ctx, store.Fence{
+		ID: "work", Name: "work", At: near(300), RadiusM: 150,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Sitting right on the "work" fence, 300 m from "home".
+	v := vehicle("v", "ryde", 300, 20000)
+	v.DistanceM = 999 // whatever the client computed from the query centre
+	h.fetch.vehicles = []entur.Vehicle{v}
+
+	rep, err := h.p.Tick(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Queries != 1 {
+		t.Fatalf("expected one coalesced query, got %d", rep.Queries)
+	}
+	got, err := h.st.LatestNearest(ctx, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, ok := got["ryde"]
+	if !ok || n.DistanceM == nil {
+		t.Fatalf("nearest not recorded for work: %+v", got)
+	}
+	if *n.DistanceM > 20 {
+		t.Errorf("distance from work = %d m, want ~0 - it is sitting on the fence", *n.DistanceM)
 	}
 }

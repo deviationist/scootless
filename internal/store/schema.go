@@ -65,6 +65,20 @@ CREATE TABLE IF NOT EXISTS presence (
   PRIMARY KEY (fence_id, vehicle_id, first_seen)
 );
 
+-- How far away the nearest vehicle of each operator is, including when that
+-- is outside the fence. A zero count answers "is there one here"; this
+-- answers "and if not, how far do I have to walk".
+CREATE TABLE IF NOT EXISTS nearest (
+  fence_id   TEXT NOT NULL REFERENCES fence(id),
+  at         INTEGER NOT NULL,
+  operator   TEXT NOT NULL,
+  distance_m INTEGER,          -- NULL: none found within reach
+  vehicle_id TEXT,
+  PRIMARY KEY (fence_id, at, operator)
+);
+
+CREATE INDEX IF NOT EXISTS nearest_at_idx ON nearest(fence_id, operator, at);
+
 CREATE INDEX IF NOT EXISTS presence_open_idx ON presence(fence_id, last_seen);
 CREATE INDEX IF NOT EXISTS presence_arrival_idx ON presence(fence_id, first_seen);
 `

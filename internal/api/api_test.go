@@ -358,3 +358,126 @@ func TestTokenGatesTheAPIButNotHealth(t *testing.T) {
 		t.Errorf("right token: code = %d, want 200", w.Code)
 	}
 }
+
+// --- status ----------------------------------------------------------------
+
+func seedStatus(t *testing.T, st *store.Store, counts map[string]int, near map[string]int, absent []string) {
+	t.Helper()
+	ctx := context.Background()
+	for op, n := range counts {
+		if err := st.RecordSample(ctx, "home", now, op, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for op, d := range near {
+		d := d
+		if err := st.RecordNearest(ctx, "home", now,
+			store.Nearest{Operator: op, At: now, DistanceM: &d, VehicleID: "v-" + op}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, op := range absent {
+		if err := st.RecordNearest(ctx, "home", now,
+			store.Nearest{Operator: op, At: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestStatusSummaryReadsLikeASentence(t *testing.T) {
+	s, _, st := newServer(t)
+	seedStatus(t,
+		st,
+		map[string]int{"bolt": 2, "voi": 0, "ryde": 0},
+		map[string]int{"bolt": 40, "voi": 173, "ryde": 481},
+		nil)
+
+	w := do(t, s, "GET", "/api/v1/status?fence=home&operators=ryde,voi,bolt", "")
+	if w.Code != 200 {
+		t.Fatalf("code = %d: %s", w.Code, w.Body)
+	}
+	var got struct {
+		Summary string         `json:"summary"`
+		Counts  map[string]int `json:"counts"`
+	}
+	decodeBody(t, w, &got)
+
+	want := "2 Bolt available, 173 m to nearest Voi, 481 m to nearest Ryde"
+	if got.Summary != want {
+		t.Errorf("summary =\n  %q\nwant\n  %q", got.Summary, want)
+	}
+	if got.Counts["ryde"] != 0 || got.Counts["bolt"] != 2 {
+		t.Errorf("counts = %v", got.Counts)
+	}
+}
+
+// "No Ryde within reach" is a different decision from "one 481 m away", so it
+// must not render as a distance of zero or vanish.
+func TestStatusDistinguishesAbsentFromFarAway(t *testing.T) {
+	s, _, st := newServer(t)
+	seedStatus(t, st,
+		map[string]int{"ryde": 0, "voi": 0},
+		map[string]int{"voi": 900},
+		[]string{"ryde"})
+
+	var got struct {
+		Summary string `json:"summary"`
+		Nearest map[string]struct {
+			DistanceM *int `json:"distance_m"`
+		} `json:"nearest"`
+	}
+	decodeBody(t, do(t, s, "GET", "/api/v1/status?fence=home&operators=ryde,voi", ""), &got)
+
+	if got.Nearest["ryde"].DistanceM != nil {
+		t.Errorf("ryde distance = %v, want null", *got.Nearest["ryde"].DistanceM)
+	}
+	want := "900 m to nearest Voi, no Ryde nearby"
+	if got.Summary != want {
+		t.Errorf("summary = %q, want %q", got.Summary, want)
+	}
+}
+
+// An available scooter beats any distance, so presence sorts ahead.
+func TestStatusPutsAvailableOperatorsFirst(t *testing.T) {
+	s, _, st := newServer(t)
+	seedStatus(t, st,
+		map[string]int{"ryde": 0, "bolt": 1},
+		map[string]int{"ryde": 20, "bolt": 300},
+		nil)
+	var got struct {
+		Summary string `json:"summary"`
+	}
+	decodeBody(t, do(t, s, "GET", "/api/v1/status?fence=home&operators=ryde,bolt", ""), &got)
+	want := "1 Bolt available, 20 m to nearest Ryde"
+	if got.Summary != want {
+		t.Errorf("summary = %q, want %q", got.Summary, want)
+	}
+}
+
+func TestStatusBeforeAnyDataIsCollected(t *testing.T) {
+	s, _, _ := newServer(t)
+	var got struct {
+		Summary string `json:"summary"`
+	}
+	w := do(t, s, "GET", "/api/v1/status?fence=home", "")
+	if w.Code != 200 {
+		t.Fatalf("code = %d: %s", w.Code, w.Body)
+	}
+	decodeBody(t, w, &got)
+	if got.Summary != "nothing known yet" {
+		t.Errorf("summary = %q", got.Summary)
+	}
+}
+
+func TestStatusValidatesFence(t *testing.T) {
+	s, _, _ := newServer(t)
+	if w := do(t, s, "GET", "/api/v1/status", ""); w.Code != 400 {
+		t.Errorf("missing fence: code = %d, want 400", w.Code)
+	}
+	if w := do(t, s, "GET", "/api/v1/status?fence=nope", ""); w.Code != 404 {
+		t.Errorf("unknown fence: code = %d, want 404", w.Code)
+	}
+	if w := do(t, s, "GET", "/api/v1/status?fence=home&operators=tier", ""); w.Code != 400 {
+		t.Errorf("bad operator: code = %d, want 400", w.Code)
+	}
+}

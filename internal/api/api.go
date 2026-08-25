@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/watches/{id}", s.getWatch)
 	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.cancelWatch)
 	mux.HandleFunc("GET /api/v1/watches/{id}/events", s.watchEvents)
+	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/history", s.history)
 	mux.HandleFunc("GET /api/v1/arrivals", s.arrivals)
 	return s.authenticated(mux)
@@ -597,4 +600,133 @@ func randomID() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(b)
+}
+
+// status answers the whole question in one call: what is inside the fence
+// right now, and for anything that is not, how far away the nearest one is.
+//
+// A bare zero is a bad answer. "No Ryde here" and "no Ryde within five
+// kilometres" call for completely different decisions, and so does "none here,
+// but one 173 m away" - which is a walk, not a defeat.
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	fenceID := r.URL.Query().Get("fence")
+	if fenceID == "" {
+		writeErr(w, http.StatusBadRequest, "fence is required")
+		return
+	}
+	f, err := s.Store.Fence(ctx, fenceID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no such fence")
+		return
+	}
+	want := splitOperators(r.URL.Query().Get("operators"))
+	if err := validOperators(want); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	counts, at, err := s.Store.LatestCounts(ctx, fenceID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	nearest, err := s.Store.LatestNearest(ctx, fenceID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	type nearestJSON struct {
+		DistanceM *int      `json:"distance_m"`
+		VehicleID string    `json:"vehicle_id,omitempty"`
+		At        time.Time `json:"at"`
+	}
+	outCounts := map[string]int{}
+	outNearest := map[string]nearestJSON{}
+	for _, o := range entur.Operators() {
+		if len(want) > 0 && !contains(want, o.Key) {
+			continue
+		}
+		outCounts[o.Key] = counts[o.Key]
+		if n, ok := nearest[o.Key]; ok {
+			outNearest[o.Key] = nearestJSON{
+				DistanceM: n.DistanceM, VehicleID: n.VehicleID, At: n.At,
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fence":   fenceOf(f),
+		"at":      at,
+		"counts":  outCounts,
+		"nearest": outNearest,
+		"summary": summarise(want, counts, nearest),
+	})
+}
+
+// summarise renders the human sentence: "2 Bolt available, 173 m to nearest
+// Voi, 481 m to nearest Ryde".
+//
+// Operators that are present come first, because an available scooter beats
+// any distance; the rest follow in order of how far you would have to walk.
+func summarise(want []string, counts map[string]int, nearest map[string]store.Nearest) string {
+	type entry struct {
+		text  string
+		here  bool
+		order float64
+	}
+	var entries []entry
+
+	for _, o := range entur.Operators() {
+		if len(want) > 0 && !contains(want, o.Key) {
+			continue
+		}
+		if n := counts[o.Key]; n > 0 {
+			entries = append(entries, entry{
+				text:  fmt.Sprintf("%d %s available", n, o.Name),
+				here:  true,
+				order: -float64(n),
+			})
+			continue
+		}
+		near, ok := nearest[o.Key]
+		if !ok {
+			continue
+		}
+		if near.DistanceM == nil {
+			entries = append(entries, entry{
+				text:  fmt.Sprintf("no %s nearby", o.Name),
+				order: math.Inf(1),
+			})
+			continue
+		}
+		entries = append(entries, entry{
+			text:  fmt.Sprintf("%d m to nearest %s", *near.DistanceM, o.Name),
+			order: float64(*near.DistanceM),
+		})
+	}
+	if len(entries) == 0 {
+		return "nothing known yet"
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].here != entries[j].here {
+			return entries[i].here
+		}
+		return entries[i].order < entries[j].order
+	})
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, e.text)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
