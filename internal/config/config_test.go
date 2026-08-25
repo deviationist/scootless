@@ -127,3 +127,29 @@ func TestRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+// A server with no topic sends nowhere while looking configured, which is the
+// worst failure mode a notifier has.
+func TestNtfyServerAndTopicMustBeSetTogether(t *testing.T) {
+	if _, err := Load(writeEnv(t, "SCOOTLESS_NTFY_SERVER=https://ntfy.sh\n")); err == nil {
+		t.Error("want an error for a server with no topic")
+	}
+	if _, err := Load(writeEnv(t, "SCOOTLESS_NTFY_TOPIC=abc\n")); err == nil {
+		t.Error("want an error for a topic with no server")
+	}
+	cfg, err := Load(writeEnv(t,
+		"SCOOTLESS_NTFY_SERVER=https://ntfy.sh\nSCOOTLESS_NTFY_TOPIC=abc\n"))
+	if err != nil {
+		t.Fatalf("both set should be valid: %v", err)
+	}
+	if cfg.NtfyTopic != "abc" {
+		t.Errorf("NtfyTopic = %q", cfg.NtfyTopic)
+	}
+}
+
+func TestNtfyPriorityIsRangeChecked(t *testing.T) {
+	body := "SCOOTLESS_NTFY_SERVER=https://ntfy.sh\nSCOOTLESS_NTFY_TOPIC=abc\nSCOOTLESS_NTFY_PRIORITY=9\n"
+	if _, err := Load(writeEnv(t, body)); err == nil {
+		t.Error("want an error for a priority above 5")
+	}
+}

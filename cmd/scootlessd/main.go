@@ -156,23 +156,51 @@ func run() error {
 // no broker configured the watch machinery still works fully; it just logs,
 // which keeps the feature usable before any messaging exists.
 func buildSink(ctx context.Context, cfg config.Config, log *slog.Logger) (poll.Sink, func()) {
-	if cfg.MQTTBroker == "" {
-		log.Info("no mqtt broker configured; notifications will be logged only")
-		return notify.LogSink{Log: log}, func() {}
+	var (
+		sinks   notify.Multi
+		closers []func()
+	)
+
+	if cfg.MQTTBroker != "" {
+		m, err := notify.Dial(ctx, notify.Options{
+			Broker: cfg.MQTTBroker, ClientID: cfg.MQTTClientID,
+			Username: cfg.MQTTUsername, Password: cfg.MQTTPassword,
+			Prefix: cfg.MQTTTopic, Log: log,
+		})
+		if err != nil {
+			// A broker that is down must not stop the collector: the history
+			// is still worth recording, the watch still fires and is
+			// recorded, and any other sink still delivers.
+			log.Error("connecting to mqtt; continuing without it", "err", err)
+		} else {
+			log.Info("publishing to mqtt", "topic_prefix", cfg.MQTTTopic)
+			sinks = append(sinks, m)
+			closers = append(closers, m.Close)
+		}
 	}
-	m, err := notify.Dial(ctx, notify.Options{
-		Broker: cfg.MQTTBroker, ClientID: cfg.MQTTClientID,
-		Username: cfg.MQTTUsername, Password: cfg.MQTTPassword,
-		Prefix: cfg.MQTTTopic, Log: log,
-	})
-	if err != nil {
-		// A broker that is down must not stop the collector: the history is
-		// still worth recording, and the watch still fires and is recorded.
-		log.Error("connecting to mqtt; falling back to logging", "err", err)
-		return notify.LogSink{Log: log}, func() {}
+
+	if cfg.NtfyServer != "" {
+		log.Info("publishing to ntfy", "server", cfg.NtfyServer,
+			"authenticated", cfg.NtfyToken != "")
+		sinks = append(sinks, &notify.Ntfy{
+			Server: cfg.NtfyServer, Topic: cfg.NtfyTopic,
+			Token: cfg.NtfyToken, Priority: cfg.NtfyPriority,
+		})
 	}
-	log.Info("publishing to mqtt", "topic_prefix", cfg.MQTTTopic)
-	return m, m.Close
+
+	release := func() {
+		for _, c := range closers {
+			c()
+		}
+	}
+	if len(sinks) == 0 {
+		log.Info("no notification sink configured; watches will be logged only")
+		return notify.LogSink{Log: log}, release
+	}
+	// Always log as well, so a fired watch is visible in the journal even
+	// when every delivery path is having a bad day.
+	sinks = append(sinks, notify.LogSink{Log: log})
+	return sinks, release
 }
 
 func logTick(log *slog.Logger, rep poll.Report) {

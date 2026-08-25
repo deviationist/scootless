@@ -40,6 +40,11 @@ type Config struct {
 	// means the API is open, which is only appropriate on a loopback bind.
 	APIToken string
 
+	NtfyServer   string
+	NtfyTopic    string
+	NtfyToken    string
+	NtfyPriority int
+
 	MQTTBroker   string
 	MQTTTopic    string
 	MQTTClientID string
@@ -118,6 +123,12 @@ func (c *Config) apply(v map[string]string) error {
 	strVal(v, Prefix+"DB", &c.DBPath)
 	strVal(v, Prefix+"HTTP_ADDR", &c.HTTPAddr)
 	strVal(v, Prefix+"API_TOKEN", &c.APIToken)
+	strVal(v, Prefix+"NTFY_SERVER", &c.NtfyServer)
+	strVal(v, Prefix+"NTFY_TOPIC", &c.NtfyTopic)
+	strVal(v, Prefix+"NTFY_TOKEN", &c.NtfyToken)
+	if err := intVal(v, Prefix+"NTFY_PRIORITY", &c.NtfyPriority); err != nil {
+		return err
+	}
 	strVal(v, Prefix+"MQTT_BROKER", &c.MQTTBroker)
 	strVal(v, Prefix+"MQTT_TOPIC", &c.MQTTTopic)
 	strVal(v, Prefix+"MQTT_CLIENT_ID", &c.MQTTClientID)
@@ -139,6 +150,14 @@ func (c *Config) apply(v map[string]string) error {
 	}
 	if c.RadiusM <= 0 {
 		return fmt.Errorf("%sRADIUS must be positive", Prefix)
+	}
+	// A server without a topic silently sends nowhere, which is the worst
+	// possible failure for a notifier: it looks configured and is not.
+	if (c.NtfyServer == "") != (c.NtfyTopic == "") {
+		return fmt.Errorf("%sNTFY_SERVER and %sNTFY_TOPIC must be set together", Prefix, Prefix)
+	}
+	if c.NtfyPriority < 0 || c.NtfyPriority > 5 {
+		return fmt.Errorf("%sNTFY_PRIORITY must be between 1 and 5", Prefix)
 	}
 	return nil
 }
