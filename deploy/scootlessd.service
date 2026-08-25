@@ -1,0 +1,40 @@
+# Example systemd user unit for the collector.
+#
+# Install:
+#   cp deploy/scootlessd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now scootlessd
+#
+# A user unit only survives logout where lingering is enabled:
+#   loginctl enable-linger $USER
+# Otherwise install it as a system unit instead.
+#
+# Assumes the repository is checked out at ~/code/scootless and built
+# with: go build -o bin/scootlessd ./cmd/scootlessd
+
+[Unit]
+Description=scootless collector - polls nearby rentable scooters and records history
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/scootless
+ExecStart=%h/code/scootless/bin/scootlessd -config %h/code/scootless
+Restart=always
+RestartSec=10s
+
+# The database and log are the only things this writes.
+StateDirectory=scootless
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/scootless
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target
