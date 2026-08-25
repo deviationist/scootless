@@ -9,8 +9,10 @@
 #   loginctl enable-linger $USER
 # Otherwise install it as a system unit instead.
 #
-# Assumes the repository is checked out at ~/code/scootless and built
-# with: go build -o bin/scootlessd ./cmd/scootlessd
+# Assumes the repository is checked out at ~/code/scootless. Use `make install`
+# rather than restarting by hand: the unit runs a prebuilt binary, so a restart
+# on its own will happily rerun a stale build and look like a configuration
+# change that did not take effect.
 
 [Unit]
 Description=scootless collector - polls nearby rentable scooters and records history
