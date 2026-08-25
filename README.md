@@ -37,8 +37,24 @@ brand's count is the only one that matters.
 |---|---|
 | **`scootless.py`** | The one-shot CLI. Python 3.8+, standard library only, no build step. Answers the first question and nothing else. |
 | **`scootlessd`** | The daemon. Polls, keeps history, holds watches, and notifies. Go, single static binary, SQLite. |
+| **`scootless-track`** | Follows vehicles you name and reports where they go. |
 
-They are independent: the CLI needs nothing running, and the daemon needs no CLI.
+The CLI needs nothing running, and the daemon needs no CLI.
+
+`scootless-track` exists because of one property of the feed: **an active rental
+removes a vehicle rather than flagging it.** So a vehicle that can no longer be
+looked up is in use, and one that reappears elsewhere has been parked there —
+which is what separates "somebody rode it away" from "a van collected it".
+
+```
+$ scootless-track YRY:Vehicle:ea3...
+21:17:07  parked      YRY:Vehicle:ea359795…  range_km=32
+21:31:27  vanished    YRY:Vehicle:ea359795…  note=in use, or withdrawn
+21:44:07  reappeared  YRY:Vehicle:ea359795…  moved_m=1840 bearing=NE gone_for_s=760
+```
+
+It follows only the identifiers it is given. It is not a way to log a city, and
+should not become one.
 
 ## Quick start
 
@@ -229,6 +245,10 @@ Findings from probing the live API, each of which cost time to discover:
 - **The GraphQL endpoint takes raw coordinates**, so it spans city systems
   automatically — you never pick a feed. The per-city GBFS feeds are only needed
   for whole-city snapshots.
+- **Vehicles can be looked up by id**, singly or in batches, with no radius and
+  so no nearest-N selection — a vehicle kilometres away comes back as readily as
+  one outside the door. An unknown id yields a clean `null` rather than an
+  error, which makes "gone from the feed" unambiguous.
 - **Operator coverage is per city, and an absent operator is not an error.**
   Dott runs in Trondheim but has nothing in Oslo; Bolt is Oslo-only of the
   cities checked. A valid operator with no vehicles returns an empty list that

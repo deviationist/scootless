@@ -8,6 +8,7 @@ work on it without rediscovering the sharp edges.
 ```
 scootless.py          the one-shot CLI: Python 3.8+, stdlib only, no build step
 cmd/scootlessd/       the daemon
+cmd/scootless-track/  follows named vehicles; answers ridden-vs-relocated
 internal/entur/       upstream API client, operator registry, vehicle model
 internal/geo/         distance, bearing, compass, bounding circles
 internal/store/       SQLite: fences, watches, samples, presence, nearest
@@ -69,6 +70,10 @@ opposite:
   while advertising 5; Voi is bimodal at ~30 s or ~59 s; Bolt moves only every
   ~5 minutes. Each operator runs on its own phase, so there is no clock to
   synchronise to, and the GraphQL endpoint exposes no timestamp of its own.
+- **`vehicle(id:)` and `vehicles(ids:)` exist** and are not radius-filtered, so
+  they escape the nearest-N selection entirely. An unknown id returns null, not
+  an error. `Client.ByID` uses a zero radius to mean "no area limit"; do not
+  "fix" that by giving it a default.
 - **Operator coverage is per city.** Dott runs in Trondheim, not Oslo. An
   absent operator is normal, not a fault.
 

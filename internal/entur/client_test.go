@@ -247,3 +247,92 @@ func TestLiveOslo(t *testing.T) {
 		t.Errorf("vehicles are not JSON-serialisable: %v", err)
 	}
 }
+
+func TestByIDReturnsAMapKeyedByID(t *testing.T) {
+	c := serveJSON(t, wrap(
+		vehicleJSON("a", 59.9140, 10.7522, "SCOOTER_STANDING", false, false, 20000, nil, "YRY:Operator:Ryde"),
+		vehicleJSON("b", 60.5000, 11.0000, "SCOOTER_STANDING", false, false, 20000, nil, "YRY:Operator:Ryde"),
+	))
+	got, err := c.ByID(context.Background(), []string{"a", "b"}, Query{At: here})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d vehicles, want 2", len(got))
+	}
+	if _, ok := got["a"]; !ok {
+		t.Error("result not keyed by id")
+	}
+	// "b" is ~70 km away. A look-up by id must not be distance-filtered, or
+	// tracking a vehicle would stop working the moment it went anywhere.
+	if _, ok := got["b"]; !ok {
+		t.Error("a distant vehicle was dropped from a look-up by id")
+	}
+}
+
+// An id absent from the result means absent from the feed - which for a
+// rentable vehicle usually means somebody is riding it.
+func TestByIDOmitsUnknownIDsWithoutError(t *testing.T) {
+	c := serveJSON(t, wrap())
+	got, err := c.ByID(context.Background(), []string{"missing"}, Query{})
+	if err != nil {
+		t.Fatalf("an unknown id should not be an error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+func TestByIDWithNoIDsMakesNoRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+	c := New("scootless-test")
+	c.Endpoint = srv.URL
+
+	got, err := c.ByID(context.Background(), nil, Query{})
+	if err != nil || len(got) != 0 {
+		t.Errorf("got %v, %v", got, err)
+	}
+	if called {
+		t.Error("an empty id list still hit the network")
+	}
+}
+
+func TestByIDStillFiltersUnrentableAndNonScooters(t *testing.T) {
+	c := serveJSON(t, wrap(
+		vehicleJSON("dead", 59.9140, 10.7522, "SCOOTER_STANDING", true, false, 20000, nil, "YRY:Operator:Ryde"),
+		vehicleJSON("bike", 59.9140, 10.7522, "BICYCLE", false, false, 20000, nil, "YVO:Operator:voi"),
+	))
+	got, err := c.ByID(context.Background(), []string{"dead", "bike"}, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want the unrentable and the bicycle filtered out", got)
+	}
+}
+
+func TestLiveByID(t *testing.T) {
+	if os.Getenv("SCOOTLESS_LIVE") != "1" {
+		t.Skip("set SCOOTLESS_LIVE=1 to exercise the real API")
+	}
+	c := New("scootless-test")
+	res, err := c.Vehicles(context.Background(), Query{At: here, RadiusM: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Count() == 0 {
+		t.Skip("nothing parked nearby to look up")
+	}
+	want := res.Vehicles[0].ID
+	got, err := c.ByID(context.Background(), []string{want}, Query{At: here})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[want]; !ok {
+		t.Errorf("a vehicle seen a moment ago could not be looked up by id")
+	}
+}

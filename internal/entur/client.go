@@ -239,8 +239,9 @@ func convert(rv gqlVehicle, q Query) (Vehicle, bool) {
 	at := geo.Point{Lat: rv.Lat, Lon: rv.Lon}
 	dist := geo.DistanceM(q.At, at)
 	// The API filters by radius server-side; this is belt and braces, and it
-	// also trims the over-fetch when several fences share one query.
-	if dist > float64(q.RadiusM) {
+	// also trims the over-fetch when several fences share one query. A zero
+	// radius means no area limit at all, which is how look-ups by id arrive.
+	if q.RadiusM > 0 && dist > float64(q.RadiusM) {
 		return Vehicle{}, false
 	}
 
@@ -312,4 +313,82 @@ func (c *Client) http() *http.Client {
 		return &http.Client{Timeout: 25 * time.Second}
 	}
 	return c.HTTP
+}
+
+const byIDQuery = `
+query ($ids: [String!]) {
+  vehicles(ids: $ids) {
+    id
+    lat
+    lon
+    isReserved
+    isDisabled
+    currentRangeMeters
+    currentFuelPercent
+    vehicleType { formFactor }
+    rentalUris { android ios }
+    system { operator { id name { translation { value } } } }
+  }
+}`
+
+// ByID looks vehicles up by identifier, wherever they are.
+//
+// This is not a radius query, so it is not subject to the nearest-N selection
+// that count imposes: a vehicle three kilometres away is returned just as
+// readily as one outside the door. An id that is absent from the result is
+// absent from the feed entirely - which, for a rentable vehicle, most often
+// means somebody is riding it, since an active rental removes it from the feed
+// rather than flagging it.
+//
+// Filters in q that concern a search area are ignored; only MinRangeM,
+// FormFactors and IncludeUnrentable apply. Distances and bearings are relative
+// to q.At, which may be the zero value if the caller does not care.
+func (c *Client) ByID(ctx context.Context, ids []string, q Query) (map[string]Vehicle, error) {
+	out := make(map[string]Vehicle, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	body, err := json.Marshal(map[string]any{
+		"query":     byIDQuery,
+		"variables": map[string]any{"ids": ids},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(),
+		bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("ET-Client-Name", c.clientName())
+
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mobility API: unexpected status %s", resp.Status)
+	}
+	var out2 gqlResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out2); err != nil {
+		return nil, fmt.Errorf("mobility API: decoding response: %w", err)
+	}
+	if len(out2.Errors) > 0 {
+		return nil, fmt.Errorf("mobility API: %s", out2.Errors[0].Message)
+	}
+
+	// A radius of zero would make convert drop everything, so look-ups by id
+	// are not distance-filtered at all.
+	lookup := q
+	lookup.RadiusM = 0
+	for _, rv := range out2.Data.Vehicles {
+		v, keep := convert(rv, lookup)
+		if !keep {
+			continue
+		}
+		out[v.ID] = v
+	}
+	return out, nil
 }
