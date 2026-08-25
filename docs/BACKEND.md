@@ -19,13 +19,33 @@ Everything else (the last hop of a notification, the UI) sits outside.
 
 One loop drives everything. It is the only thing that talks upstream.
 
-**Phase-lock to the feed's own clock.** The upstream feed advances
-`last_updated` in exact 30-second steps. Polling on a free-running 30 s timer
-means a scooter can appear immediately after a poll and go unreported for
-almost a full cycle. Instead, read `last_updated`, and schedule the next poll
-for roughly a second after the next expected step. Same request rate, but
-worst-case latency drops from ~30 s to a second or two — which is the entire
-difference between "I need a scooter" being useful and being a novelty.
+**A fixed interval, because there is no clock to lock onto.** This design
+originally called for phase-locking the poller to the feed's own 30-second
+step, on the strength of the README's claim that `last_updated` advances in
+exact 30-second increments. Measuring all three Oslo operators rather than one
+showed that claim does not hold, and the idea does not survive it:
+
+| Operator | advertised `ttl` | measured step |
+|---|---|---|
+| Ryde | 5 s | 29–33 s, mean 30 |
+| Voi | 30 s | irregular, 30–62 s |
+| Bolt | 300 s | ~317 s |
+
+Three findings follow. Each operator ticks on **its own phase**, so there is no
+single clock to lock onto. Ryde **jitters** either side of 30 s rather than
+stepping exactly, so even a per-operator lock would drift. And **Bolt updates
+roughly every five minutes**, which puts a floor on notification latency for
+that operator that no polling strategy can lower.
+
+The honest replacement is a fixed interval a little under the fastest
+operator's cadence — 20 s — which catches Ryde's ticks without aliasing and
+accepts that for the slower operators the upstream cadence dominates. The
+GraphQL endpoint carries no timestamp of its own, so the alternative would mean
+a second request per operator per tick to read a GBFS header, for latency that
+is bounded upstream anyway.
+
+Worth stating in the product: an appearance watch on Bolt cannot be as
+responsive as one on Ryde, and that is a property of the data, not the tool.
 
 **Coalesce queries.** One upstream request per armed watch per tick does not
 scale and is rude to a free dataset. Group active fences: overlapping or nearby
