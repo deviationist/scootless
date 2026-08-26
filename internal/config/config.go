@@ -40,6 +40,11 @@ type Config struct {
 	// means the API is open, which is only appropriate on a loopback bind.
 	APIToken string
 
+	// AllowedOrigins are browser origins allowed to call the API
+	// cross-origin, comma-separated in the environment. Empty means no CORS,
+	// which is correct for a loopback-only deployment.
+	AllowedOrigins []string
+
 	NtfyServer   string
 	NtfyTopic    string
 	NtfyToken    string
@@ -123,6 +128,9 @@ func (c *Config) apply(v map[string]string) error {
 	strVal(v, Prefix+"DB", &c.DBPath)
 	strVal(v, Prefix+"HTTP_ADDR", &c.HTTPAddr)
 	strVal(v, Prefix+"API_TOKEN", &c.APIToken)
+	if s, ok := nonEmpty(v, Prefix+"ALLOWED_ORIGINS"); ok {
+		c.AllowedOrigins = parseOrigins(s)
+	}
 	strVal(v, Prefix+"NTFY_SERVER", &c.NtfyServer)
 	strVal(v, Prefix+"NTFY_TOPIC", &c.NtfyTopic)
 	strVal(v, Prefix+"NTFY_TOKEN", &c.NtfyToken)
@@ -240,4 +248,18 @@ func defaultDBPath() string {
 		return "scootless.db"
 	}
 	return filepath.Join(home, ".local", "state", "scootless", "scootless.db")
+}
+
+// parseOrigins splits a comma-separated origin list, trimming blanks. An
+// origin is scheme + host + port with no trailing slash; a trailing slash is
+// the usual way to configure this wrong, so it is stripped rather than
+// silently failing to match.
+func parseOrigins(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimRight(strings.TrimSpace(part), "/"); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

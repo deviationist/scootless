@@ -53,6 +53,11 @@ type Server struct {
 	// mechanism; see docs/BACKEND.md.
 	Token string
 
+	// AllowedOrigins lists browser origins permitted to call the API
+	// cross-origin. Empty disables CORS entirely, which is the right default
+	// for a loopback bind. See cors.go.
+	AllowedOrigins []string
+
 	// Now is overridable so tests can drive time.
 	Now func() time.Time
 }
@@ -73,7 +78,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/board", s.board)
 	mux.HandleFunc("GET /api/v1/history", s.history)
 	mux.HandleFunc("GET /api/v1/arrivals", s.arrivals)
-	return s.authenticated(mux)
+	// CORS must sit OUTSIDE the bearer check: a preflight carries no
+	// Authorization header, so authenticating it first would 401 every
+	// browser client. See cors.go.
+	return s.cors(s.authenticated(mux))
 }
 
 // authenticated gates /api/ behind the bearer token when one is configured.

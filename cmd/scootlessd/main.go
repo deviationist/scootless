@@ -120,6 +120,7 @@ func run() error {
 			Addr: cfg.HTTPAddr,
 			Handler: (&api.Server{
 				Store: st, Client: client, Log: log, Token: cfg.APIToken,
+				AllowedOrigins: cfg.AllowedOrigins,
 				DefaultAt: cfg.Home, HasDefault: cfg.HasHome,
 			}).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
