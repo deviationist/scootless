@@ -95,6 +95,15 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			return
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if got == "" {
+			// A browser EventSource cannot set an Authorization header, so the
+			// SSE stream accepts the token as a query parameter as a fallback.
+			// This is a deliberate, bounded relaxation: the token then appears
+			// in access logs, but the API is LAN-gated and the alternative is a
+			// backend proxy for every dashboard. The header remains preferred
+			// for every non-browser client.
+			got = r.URL.Query().Get("token")
+		}
 		// Constant-time, so the comparison cannot be used as an oracle.
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, "unauthorised")
