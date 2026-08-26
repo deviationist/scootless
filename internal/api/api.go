@@ -42,6 +42,11 @@ type Server struct {
 	Prefs  board.Prefs
 	Log    *slog.Logger
 
+	// DefaultAt is the fallback location (the configured home) used when a
+	// request omits lat/lon — so a fixed wall display can poll /board bare.
+	DefaultAt  geo.Point
+	HasDefault bool
+
 	// Token, when set, is required as a bearer token on every /api/ route.
 	// A phone cannot log in interactively every morning without defeating
 	// the point of the feature, so a long-lived per-device token is the
@@ -524,6 +529,16 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// coordsOrDefault resolves lat/lon from the request, falling back to the
+// configured home location when both are omitted — so a fixed display polls
+// /board with no params.
+func (s *Server) coordsOrDefault(latS, lonS string) (float64, float64, error) {
+	if latS == "" && lonS == "" && s.HasDefault {
+		return s.DefaultAt.Lat, s.DefaultAt.Lon, nil
+	}
+	return coords(latS, lonS)
+}
+
 func coords(latS, lonS string) (float64, float64, error) {
 	if latS == "" || lonS == "" {
 		return 0, 0, errors.New("lat and lon are required")
@@ -756,7 +771,7 @@ func contains(hay []string, needle string) bool {
 // leaving-the-house view for a wall display.
 func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	lat, lon, err := coords(q.Get("lat"), q.Get("lon"))
+	lat, lon, err := s.coordsOrDefault(q.Get("lat"), q.Get("lon"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
