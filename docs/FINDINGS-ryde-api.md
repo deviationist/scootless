@@ -250,3 +250,48 @@ pointless. The clean fix is the same as before and now more clearly motivated:
 rotate the **whole** identifier (including the prefix — do not embed the visible
 number), and remove `deviceIMEI` from the public `rental_uris`. Either alone is
 insufficient; both stable keys have to go.
+
+---
+
+# Update: the attack demonstrated end-to-end, autonomously
+
+A second consenting ride (2026-08-26, the account holder's own scooter) ran the
+*corrected* tracking method — matching on the stable number, not the rotating
+full UUID — with no manual intervention.
+
+Setup: a follower polling the whole-city GraphQL feed (30 km radius, gzip'd
+~130 KB) every 8 s, filtering for the stable number `370341`.
+
+Result:
+- While rented, the scooter was absent from the feed (unlocatable), as before.
+- On end-ride it reappeared, and the follower logged the parking position **on
+  its own** — no cue from the rider. Position confirmed accurate against where
+  the rider actually parked (a second confirmation of feed positional accuracy).
+- End-ride → visible latency was seconds this time, versus minutes on the first
+  ride: that latency is variable, not fixed.
+
+This closes the loop the first ride left open. The complete chain, all from
+public unauthenticated data:
+
+```
+number on the scooter (377489 / 370341)
+   → stable feed key (the ea-prefix, or the IMEI)
+   → poll the whole-city feed for that key
+   → the scooter's position whenever it is parked, across every trip,
+     forever, because the key never rotates.
+```
+
+The only per-trip-rotating identifier (the full UUID tail) is irrelevant: the
+tracker never uses it. The rider's location is never needed either — only the
+scooter's stable key.
+
+## Boundary (unchanged, and load-bearing)
+
+Every ride in these tests was the account holder tracking their own scooter,
+with consent. The capability tracks *vehicles*, not *people*; going from a
+vehicle trajectory to a named person needs external data (home→identity) that
+these tests never touched and that a disclosure PoC must not build. The tooling
+that demonstrates this stays a security proof-of-concept for the Ryde + Entur
+disclosure. It is not a consumer feature: pointed at a scooter someone else is
+riding, the identical code re-identifies a stranger's commute, which is the harm
+being reported, not shipped.
