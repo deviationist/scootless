@@ -12,41 +12,43 @@ import (
 // Prefs captures how attractive each option is, so the board can recommend one
 // rather than just listing what exists.
 //
-// The default reflects "Ryde first, Voi as the alternative, Bolt last, and a
-// low battery makes any of them less attractive." It is a soft preference, not
-// an absolute: a much closer Voi beats a distant Ryde, which is the whole point
-// of scoring rather than filtering.
+// The default reflects a real subscription: Ryde is paid for, so it wins almost
+// always. Voi is considered only when the nearest Ryde is genuinely bad — a
+// *very* long walk, or a *very* low battery (which drops it out entirely). Bolt
+// is the last resort, taken only when there is no Voi around either.
 type Prefs struct {
 	// OperatorBonus is added to an operator's score. The gap between two
 	// operators is, in effect, how many metres of extra walk you'll accept to
-	// stay on your preferred brand (because distance costs 1 point/metre).
+	// stay on your preferred brand (because distance costs 1 point/metre). The
+	// Ryde→Voi gap is deliberately large: only a *very* distant Ryde loses to a
+	// closer Voi.
 	OperatorBonus map[string]float64
 
-	// Battery is treated as a penalty, not a reward: at or above ComfortKM
-	// there is no penalty, and it grows to LowPenalty as range falls to FloorKM.
-	// A penalty (rather than a mild reward) is what lets a nearly-flat scooter
-	// actually lose to a healthy one — "low battery makes it less attractive"
-	// only means something if the penalty can outweigh the operator preference.
+	// Battery is a penalty, not a reward: at or above ComfortKM there is none,
+	// and it grows to LowPenalty as range falls toward FloorKM. This ranks a
+	// half-charged Ryde below a full one without letting it lose the brand.
 	ComfortKM  float64
 	LowPenalty float64
 
-	// FloorKM excludes scooters below this remaining range outright — below a
-	// point, low battery isn't "less attractive", it's useless.
+	// FloorKM drops scooters below this remaining range outright. This is the
+	// "very low battery" trigger: a nearly-flat Ryde is not offered at all, so
+	// the recommendation falls through to the next Ryde, or to Voi if that was
+	// the only one.
 	FloorKM float64
 }
 
-// DefaultPrefs is the preference described above.
+// DefaultPrefs is the hardcoded preference for a Ryde subscriber.
 func DefaultPrefs() Prefs {
 	return Prefs{
 		OperatorBonus: map[string]float64{
-			"ryde": 300, // preferred
-			"voi":  150, // alternative — wins if ~150 m+ closer than Ryde
-			"bolt": 50,  // last resort
-			"dott": 0,
+			"ryde": 1000, // subscription — top priority, wins unless it's genuinely bad
+			"voi":  250,  // alternative — only when the nearest Ryde is >~750 m away
+			"bolt": 0,    // last resort — only when there's no Voi around either
+			"dott": -1000,
 		},
 		ComfortKM:  10,  // ≥10 km range: battery is a non-issue
-		LowPenalty: 250, // at the floor, a full 250-point hit — enough to lose a brand
-		FloorKM:    2,
+		LowPenalty: 250, // half-charged ranks lower, but doesn't lose the brand
+		FloorKM:    4,   // <4 km range = very low → dropped, which lets Voi in
 	}
 }
 

@@ -25,25 +25,53 @@ func TestNearRydeIsRecommended(t *testing.T) {
 	}
 }
 
-// A much closer Voi should beat a distant Ryde — soft preference, not absolute.
-func TestCloseVoiBeatsFarRyde(t *testing.T) {
+// A moderately-distant Ryde still wins — the subscription is strong.
+func TestModeratelyFarRydeStillWins(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
-		veh("ryde", 400, 26000),
+		veh("ryde", 400, 26000), // 400 m is not "very far"
 		veh("voi", 50, 30000),
 	}, DefaultPrefs(), 10)
-	if b.Recommendation.OperatorKey != "voi" {
-		t.Errorf("recommendation = %s, want voi (Ryde too far)", b.Recommendation.OperatorKey)
+	if b.Recommendation.OperatorKey != "ryde" {
+		t.Errorf("recommendation = %s, want ryde (400 m is not far enough to switch)", b.Recommendation.OperatorKey)
 	}
 }
 
-// A low-battery Ryde loses to a healthy nearby Voi.
-func TestLowBatteryMakesAScooterLessAttractive(t *testing.T) {
+// Only a *very* distant Ryde loses to a close Voi.
+func TestVeryFarRydeLosesToCloseVoi(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
-		veh("ryde", 120, 3000), // close but nearly flat
-		veh("voi", 140, 35000), // slightly further, full
+		veh("ryde", 900, 26000), // a very long walk
+		veh("voi", 50, 30000),
 	}, DefaultPrefs(), 10)
 	if b.Recommendation.OperatorKey != "voi" {
-		t.Errorf("recommendation = %s, want voi (the Ryde is nearly flat)", b.Recommendation.OperatorKey)
+		t.Errorf("recommendation = %s, want voi (Ryde is a 900 m walk)", b.Recommendation.OperatorKey)
+	}
+}
+
+// A very-low-battery Ryde is dropped, so a healthy Voi is recommended instead.
+func TestVeryLowBatteryRydeFallsThroughToVoi(t *testing.T) {
+	b := Assemble([]entur.Vehicle{
+		veh("ryde", 120, 2500), // close, but below the 4 km floor — nearly flat
+		veh("voi", 140, 35000), // slightly further, full
+	}, DefaultPrefs(), 10)
+	if b.Recommendation == nil || b.Recommendation.OperatorKey != "voi" {
+		t.Errorf("recommendation = %+v, want voi (the only Ryde is nearly flat)", b.Recommendation)
+	}
+	// but the flat Ryde still shows in the count — it exists, just isn't offered
+	if b.ByOperator["ryde"].Count != 1 {
+		t.Errorf("ryde count = %d, want 1", b.ByOperator["ryde"].Count)
+	}
+}
+
+// A healthy but further Ryde still beats Voi when a nearer Ryde is flat — the
+// subscription wins over Voi as long as *any* usable Ryde is around.
+func TestHealthyRydeBeatsVoiEvenIfAnotherRydeIsFlat(t *testing.T) {
+	b := Assemble([]entur.Vehicle{
+		veh("ryde", 60, 2500),   // nearest, but flat → dropped
+		veh("ryde", 250, 30000), // usable Ryde, a bit further
+		veh("voi", 80, 40000),   // close, full
+	}, DefaultPrefs(), 10)
+	if b.Recommendation.OperatorKey != "ryde" || b.Recommendation.DistanceM != 250 {
+		t.Errorf("recommendation = %+v, want the 250 m Ryde", b.Recommendation)
 	}
 }
 
