@@ -138,3 +138,38 @@ which needs data we do not have and must not obtain — a rider's account, a
 survey tied to identity, or correlation against a person's known movements. The
 finding stops at vehicle-level trackability from public data. It should stay
 there.
+
+---
+
+# Update: the legal registration plate is NOT in the feed (checked)
+
+Norwegian e-scooters carry a state registration plate (kjennemerke) — the test
+vehicle's was `OSZ478`. An obvious question is whether that plate leaks into the
+mobility API alongside the operator's own identifiers. It does not. Checked
+across every surface (2026-08-26):
+
+| Surface | Plate present? |
+|---|---|
+| Ryde app API capture | no — no plate value, no plate-shaped string |
+| Ryde APK strings | no plate / registration / kjennemerke references |
+| Entur `Vehicle` GraphQL type (14 fields) | no plate/registration field |
+| Raw Ryde GBFS `free_bike_status` (9 fields) | no plate/registration field |
+
+So a scooter carries **two independent identifier systems that do not join in
+any remote data source**:
+
+- **Operator system**, exposed in the API: the visible unlock number (`377489`)
+  → the Entur UUID (`ea377489…`) → the IMEI (`864…`). This is what a feed
+  logger sees and can track.
+- **State system**, only on the physical plate: `OSZ478`, resolvable in Statens
+  vegvesen's public vehicle register — but only by someone who has read the
+  plate off the physical scooter.
+
+This is a point in the design's favour, and worth stating so a reader does not
+assume the worst: the trackable operator identifier and the government
+registration are **siloed**. You cannot pivot from a feed-tracked scooter to its
+legal plate, or vice versa, without being physically at the vehicle to read both.
+
+It does not change the core finding — the operator system alone already gives
+durable per-vehicle tracking from public data — but it bounds it: the leak is
+operator-identifier trackability, not a bridge to the state vehicle register.
