@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/watches/{id}/events", s.watchEvents)
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/board", s.board)
+	mux.HandleFunc("GET /api/v1/board/stream", s.boardStream)
 	mux.HandleFunc("GET /api/v1/history", s.history)
 	mux.HandleFunc("GET /api/v1/arrivals", s.arrivals)
 	// CORS must sit OUTSIDE the bearer check: a preflight carries no
@@ -787,49 +788,148 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
-// board ranks the nearby scooters under the configured preference and returns
-// the best one to take, the alternatives, and a per-operator summary — the
-// leaving-the-house view for a wall display.
-func (s *Server) board(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	lat, lon, err := s.coordsOrDefault(q.Get("lat"), q.Get("lon"))
+// boardRequest holds the resolved parameters of a board query.
+type boardRequest struct {
+	At     geo.Point
+	Radius int
+	Ops    []string
+	Limit  int
+}
+
+// parseBoardRequest resolves the shared board parameters, applying the home
+// default and validating operators.
+func (s *Server) parseBoardRequest(q map[string][]string) (boardRequest, error) {
+	get := func(k string) string {
+		if v := q[k]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	lat, lon, err := s.coordsOrDefault(get("lat"), get("lon"))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		return boardRequest{}, err
 	}
 	radius, err := intParam(q, "radius", 400)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		return boardRequest{}, err
 	}
 	limit, err := intParam(q, "limit", 5)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		return boardRequest{}, err
 	}
-	ops := splitOperators(q.Get("operators"))
+	ops := splitOperators(get("operators"))
 	if err := validOperators(ops); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		return boardRequest{}, err
 	}
+	return boardRequest{At: geo.Point{Lat: lat, Lon: lon}, Radius: radius, Ops: ops, Limit: limit}, nil
+}
 
-	res, err := s.Client.Vehicles(r.Context(), entur.Query{
-		At: geo.Point{Lat: lat, Lon: lon}, RadiusM: radius, OperatorKeys: ops,
+// computeBoard fetches and assembles one board. Shared by the one-shot handler
+// and the SSE stream so they can never drift apart.
+func (s *Server) computeBoard(ctx context.Context, br boardRequest) (map[string]any, error) {
+	res, err := s.Client.Vehicles(ctx, entur.Query{
+		At: br.At, RadiusM: br.Radius, OperatorKeys: br.Ops,
 	})
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "upstream: "+err.Error())
-		return
+		return nil, err
 	}
-
 	prefs := s.Prefs
 	if prefs.OperatorBonus == nil {
 		prefs = board.DefaultPrefs()
 	}
-	b := board.Assemble(res.Vehicles, prefs, limit)
-	writeJSON(w, http.StatusOK, map[string]any{
+	b := board.Assemble(res.Vehicles, prefs, br.Limit)
+	return map[string]any{
 		"at":             s.now().UTC(),
 		"recommendation": b.Recommendation,
 		"options":        b.Options,
 		"by_operator":    b.ByOperator,
-	})
+	}, nil
+}
+
+// board ranks the nearby scooters under the configured preference and returns
+// the best one to take, the alternatives, and a per-operator summary — the
+// leaving-the-house view for a wall display.
+func (s *Server) board(w http.ResponseWriter, r *http.Request) {
+	br, err := s.parseBoardRequest(r.URL.Query())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	body, err := s.computeBoard(r.Context(), br)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "upstream: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// boardStream pushes a fresh board to the dashboard over Server-Sent Events, so
+// the pad opens one connection and receives updates instead of polling.
+//
+// The refresh cadence defaults to 30 s because that is how often the upstream
+// feed actually changes — streaming faster would re-send an identical board.
+// Each connection fetches independently; for a handful of dashboards that is a
+// few upstream calls per cycle, which is courteous. A shared broadcaster would
+// be the move only if this ever fans out to many clients.
+func (s *Server) boardStream(w http.ResponseWriter, r *http.Request) {
+	br, err := s.parseBoardRequest(r.URL.Query())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	interval, err := intParam(r.URL.Query(), "interval", 30)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if interval < 10 {
+		interval = 10 // the feed does not change faster; be courteous
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Tell nginx not to buffer this response, or SSE arrives in one lump.
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	send := func() bool {
+		body, err := s.computeBoard(r.Context(), br)
+		if err != nil {
+			// A transient upstream failure shouldn't drop the stream; report it
+			// as an event and keep the connection so the dashboard stays live.
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", jsonString(map[string]any{"error": err.Error()}))
+			flusher.Flush()
+			return true
+		}
+		fmt.Fprintf(w, "data: %s\n\n", jsonString(body))
+		flusher.Flush()
+		return true
+	}
+
+	send() // immediate first board so the dashboard renders at once
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			send()
+		}
+	}
+}
+
+// jsonString marshals to a compact string, or a minimal error object.
+func jsonString(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"error":"encoding"}`
+	}
+	return string(b)
 }
