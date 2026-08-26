@@ -173,3 +173,80 @@ legal plate, or vice versa, without being physically at the vehicle to read both
 It does not change the core finding — the operator system alone already gives
 durable per-vehicle tracking from public data — but it bounds it: the leak is
 operator-identifier trackability, not a bridge to the state vehicle register.
+
+---
+
+# Update: the ride test, and a correction — the full UUID rotates per trip
+
+A consenting single-subject ride test (2026-08-26, the account holder's own
+scooter and account) ran the vehicle through a full rental while observing the
+public feed. It confirmed the core claim, corrected an overstatement, and
+sharpened the mechanism.
+
+## What the ride test showed
+
+Baseline captured before unlock; scooter #377489 at `59.930690, 10.767192`,
+IMEI `864…58`, full id `ea377489-65e1-3f09-8f10-098fb5cecedd`.
+
+| Event | Observation |
+|---|---|
+| Remote unlock | Vanished from **all** public surfaces (GraphQL by-id, batch, spatial, raw GBFS) in ~18 s |
+| Held (locked, rental running) | Stayed absent for 20+ min — "locked mid-ride" is invisible, same as riding |
+| Ride ~2.8 km, end rental | Reappeared, but **minutes** later — end-ride latency ≫ unlock latency |
+| Position on reappearance | `59.911440, 10.734196`, **2,822 m** from start — **confirmed accurate** against where the rider actually parked |
+| IMEI on reappearance | `864…58` — **identical**. The permanent id survived the trip. |
+
+So the feed's coordinates are trustworthy, and the IMEI is stable across a
+rental — cross-trip tracking works, exactly as the IMEI (hardware serial)
+predicted.
+
+## The correction: the full UUID is per-trip
+
+The full Entur UUID is **not** stable. Across the rental it changed:
+
+```
+before:  ea377489-65e1-3f09-8f10-098fb5cecedd
+after:   ea377489-53dc-3307-8601-9ad33eb04466
+         ^^^^^^^^  ------- rotating tail -------
+         stable
+```
+
+The `ea` + scooter-number **prefix is stable**; the remaining tail is **minted
+fresh per rental** and is unpredictable. This is a real, deliberate mitigation:
+Ryde rotates the full identifier each trip, which defeats naive id-based
+tracking.
+
+It is undermined by two stable keys left in place:
+- the **scooter number** embedded in the `ea377489…` prefix, and
+- the permanent **IMEI** in the `rental_uris`.
+
+## Correcting the "cheap targeted poll" claim
+
+An earlier framing said a third party could track a scooter with one tiny
+`vehicle(id:)` query per minute. **That is wrong**, and the ride test proved it:
+the background poller was querying the *old* full id and never caught the
+reappearance, because that id had ceased to exist. `vehicle(id:)` on the
+pre-trip id returns null forever after the trip.
+
+The actual tracking loop, corrected:
+
+```
+1. Scan the bulk GBFS feed (~2 MB / city)  ->  match on a STABLE key
+                                               (number 377489, or IMEI 864…58)
+2. Read the CURRENT full id from the match  ->  ea377489-53dc-… (valid this cycle)
+3. (optional) cheap vehicle(id:) polls with that id — but only until the next
+   rental rotates the tail, then the id is dead -> return to step 1.
+```
+
+So the load-bearing step is the **bulk-feed scan on a stable key**, not a cheap
+targeted lookup. Ryde's rotation raises the attacker's *effort* (pull and grep a
+city feed after each trip, rather than one small query) but not the *outcome*
+(re-acquisition is guaranteed by the stable number and IMEI).
+
+## Net
+
+The rotation is genuine work that a stable prefix and a stable IMEI render
+pointless. The clean fix is the same as before and now more clearly motivated:
+rotate the **whole** identifier (including the prefix — do not embed the visible
+number), and remove `deviceIMEI` from the public `rental_uris`. Either alone is
+insufficient; both stable keys have to go.
