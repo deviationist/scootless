@@ -22,7 +22,6 @@ import (
 	"github.com/deviationist/scootless/internal/entur"
 	"github.com/deviationist/scootless/internal/geo"
 	"github.com/deviationist/scootless/internal/store"
-	"github.com/deviationist/scootless/internal/transit"
 )
 
 // Defaults for watch lifetime. No watch polls forever.
@@ -36,18 +35,12 @@ type Fetcher interface {
 	Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error)
 }
 
-// DepartureFetcher is the upstream transit client.
-type DepartureFetcher interface {
-	Departures(ctx context.Context, q transit.Query) ([]transit.Departure, error)
-}
-
 // Server serves the API.
 type Server struct {
-	Store   *store.Store
-	Client  Fetcher
-	Transit DepartureFetcher // optional; when nil the board omits departures
-	Prefs   board.Prefs
-	Log     *slog.Logger
+	Store  *store.Store
+	Client Fetcher
+	Prefs  board.Prefs
+	Log    *slog.Logger
 
 	// Token, when set, is required as a bearer token on every /api/ route.
 	// A phone cannot log in interactively every morning without defeating
@@ -758,12 +751,9 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
-// board is the leaving-the-house view: the best scooter to take under the
-// configured preference, plus nearby departures — one JSON for a wall display.
-//
-// The two upstreams are fetched concurrently and independently: a transit
-// outage still yields scooters and vice versa, because a wall display that
-// blanks entirely when one source hiccups is worse than one showing half.
+// board ranks the nearby scooters under the configured preference and returns
+// the best one to take, the alternatives, and a per-operator summary — the
+// leaving-the-house view for a wall display.
 func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	lat, lon, err := coords(q.Get("lat"), q.Get("lon"))
@@ -772,11 +762,6 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	radius, err := intParam(q, "radius", 400)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	stopRadius, err := intParam(q, "stop_radius", 600)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -791,81 +776,24 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	at := geo.Point{Lat: lat, Lon: lon}
 
-	type vres struct {
-		vs  []entur.Vehicle
-		err error
-	}
-	type dres struct {
-		ds  []transit.Departure
-		err error
-	}
-	vc := make(chan vres, 1)
-	dc := make(chan dres, 1)
-
-	go func() {
-		res, err := s.Client.Vehicles(r.Context(), entur.Query{
-			At: at, RadiusM: radius, OperatorKeys: ops,
-		})
-		if err != nil {
-			vc <- vres{err: err}
-			return
-		}
-		vc <- vres{vs: res.Vehicles}
-	}()
-	go func() {
-		if s.Transit == nil {
-			dc <- dres{}
-			return
-		}
-		lines := splitCSV(q.Get("lines"))
-		modes := splitCSV(q.Get("modes"))
-		ds, err := s.Transit.Departures(r.Context(), transit.Query{
-			At: at, RadiusM: stopRadius, Lines: lines, Modes: modes,
-		})
-		dc <- dres{ds: ds, err: err}
-	}()
-
-	v := <-vc
-	d := <-dc
-
-	// Scooters are the core of this product; if that upstream is down, say so.
-	if v.err != nil {
-		writeErr(w, http.StatusBadGateway, "scooters: "+v.err.Error())
+	res, err := s.Client.Vehicles(r.Context(), entur.Query{
+		At: geo.Point{Lat: lat, Lon: lon}, RadiusM: radius, OperatorKeys: ops,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "upstream: "+err.Error())
 		return
-	}
-	// Departures are secondary: log and continue rather than fail the board.
-	deps := d.ds
-	if d.err != nil {
-		s.log().Warn("board: departures unavailable", "err", d.err)
-		deps = nil
 	}
 
 	prefs := s.Prefs
 	if prefs.OperatorBonus == nil {
 		prefs = board.DefaultPrefs()
 	}
-	b := board.Assemble(v.vs, deps, prefs, limit)
-	body := map[string]any{
-		"at":              s.now().UTC(),
-		"recommendation":  b.Recommendation,
-		"options":         b.Options,
-		"by_operator":     b.ByOperator,
-		"departures":      b.Departures,
-		"departures_down": d.err != nil,
-	}
-	writeJSON(w, http.StatusOK, body)
-}
-
-// splitCSV splits a comma list, trimming blanks. Unlike splitOperators it does
-// not lowercase or treat "all" specially — line codes are case-sensitive.
-func splitCSV(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	b := board.Assemble(res.Vehicles, prefs, limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"at":             s.now().UTC(),
+		"recommendation": b.Recommendation,
+		"options":        b.Options,
+		"by_operator":    b.ByOperator,
+	})
 }

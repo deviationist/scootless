@@ -1,13 +1,12 @@
-// Package board assembles the leaving-the-house view: the best scooter to take
-// given a personal preference, and the next departures — one JSON for a wall
-// display to render.
+// Package board ranks nearby scooters under a personal preference and picks the
+// best one to take — the recommendation a display shows when you leave the
+// house.
 package board
 
 import (
 	"sort"
 
 	"github.com/deviationist/scootless/internal/entur"
-	"github.com/deviationist/scootless/internal/transit"
 )
 
 // Prefs captures how attractive each option is, so the board can recommend one
@@ -71,12 +70,12 @@ type OperatorSummary struct {
 	BestRangeKM *float64 `json:"best_range_km"`
 }
 
-// Board is the whole leaving-the-house view.
+// Board is the ranked scooter view: the best one to take, the alternatives,
+// and a per-operator summary.
 type Board struct {
 	Recommendation *Option                    `json:"recommendation"`
 	Options        []Option                   `json:"options"`
 	ByOperator     map[string]OperatorSummary `json:"by_operator"`
-	Departures     []transit.Departure        `json:"departures"`
 }
 
 // score rates one vehicle under the preference. Higher is better.
@@ -104,11 +103,11 @@ func lowBatteryPenalty(rangeKM, comfortKM, floorKM, maxPenalty float64) float64 
 	return maxPenalty * frac
 }
 
-// Assemble scores the vehicles, ranks them, summarises per operator, and
-// attaches the departures. It does not fetch anything — the caller supplies the
-// two data sets, which keeps this package pure and testable.
-func Assemble(vehicles []entur.Vehicle, deps []transit.Departure, prefs Prefs, limit int) Board {
-	b := Board{ByOperator: map[string]OperatorSummary{}, Departures: deps}
+// Assemble scores the vehicles, ranks them, and summarises per operator. It
+// does not fetch anything — the caller supplies the vehicles, which keeps this
+// package pure and testable.
+func Assemble(vehicles []entur.Vehicle, prefs Prefs, limit int) Board {
+	b := Board{ByOperator: map[string]OperatorSummary{}}
 
 	for _, v := range vehicles {
 		key := v.OperatorKey

@@ -19,7 +19,7 @@ func TestNearRydeIsRecommended(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("ryde", 100, 26000),
 		veh("voi", 50, 30000),
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	if b.Recommendation == nil || b.Recommendation.OperatorKey != "ryde" {
 		t.Fatalf("recommendation = %+v, want a Ryde", b.Recommendation)
 	}
@@ -30,7 +30,7 @@ func TestCloseVoiBeatsFarRyde(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("ryde", 400, 26000),
 		veh("voi", 50, 30000),
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	if b.Recommendation.OperatorKey != "voi" {
 		t.Errorf("recommendation = %s, want voi (Ryde too far)", b.Recommendation.OperatorKey)
 	}
@@ -41,7 +41,7 @@ func TestLowBatteryMakesAScooterLessAttractive(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("ryde", 120, 3000), // close but nearly flat
 		veh("voi", 140, 35000), // slightly further, full
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	if b.Recommendation.OperatorKey != "voi" {
 		t.Errorf("recommendation = %s, want voi (the Ryde is nearly flat)", b.Recommendation.OperatorKey)
 	}
@@ -51,7 +51,7 @@ func TestLowBatteryMakesAScooterLessAttractive(t *testing.T) {
 func TestBelowFloorIsExcluded(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("ryde", 50, 1000), // 1 km range, below the 2 km floor
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	if b.Recommendation != nil {
 		t.Errorf("recommended a below-floor scooter: %+v", b.Recommendation)
 	}
@@ -69,13 +69,13 @@ func TestBoltIsLastResort(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("bolt", 40, 40000),
 		veh("ryde", 120, 30000),
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	// ryde 120m: 300-120+60 = 240 ; bolt 40m: 50-40+60 = 70 -> ryde wins
 	if b.Recommendation.OperatorKey != "ryde" {
 		t.Errorf("recommendation = %s, want ryde over a closer Bolt", b.Recommendation.OperatorKey)
 	}
 	// but a lone Bolt is still recommended when it's all there is
-	b = Assemble([]entur.Vehicle{veh("bolt", 40, 40000)}, nil, DefaultPrefs(), 10)
+	b = Assemble([]entur.Vehicle{veh("bolt", 40, 40000)}, DefaultPrefs(), 10)
 	if b.Recommendation == nil || b.Recommendation.OperatorKey != "bolt" {
 		t.Errorf("a lone Bolt should still be recommended, got %+v", b.Recommendation)
 	}
@@ -86,7 +86,7 @@ func TestOptionsAreRankedByScore(t *testing.T) {
 		veh("bolt", 300, 20000),
 		veh("ryde", 90, 26000),
 		veh("voi", 120, 30000),
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	if len(b.Options) != 3 {
 		t.Fatalf("options = %d, want 3", len(b.Options))
 	}
@@ -105,7 +105,7 @@ func TestPerOperatorSummary(t *testing.T) {
 		veh("ryde", 100, 26000),
 		veh("ryde", 60, 30000),
 		veh("voi", 200, 15000),
-	}, nil, DefaultPrefs(), 10)
+	}, DefaultPrefs(), 10)
 	r := b.ByOperator["ryde"]
 	if r.Count != 2 || r.NearestM == nil || *r.NearestM != 60 {
 		t.Errorf("ryde summary = %+v", r)
@@ -127,7 +127,7 @@ func TestNumberExtraction(t *testing.T) {
 func TestLimitCapsOptionsButNotRecommendation(t *testing.T) {
 	b := Assemble([]entur.Vehicle{
 		veh("ryde", 90, 26000), veh("voi", 120, 30000), veh("bolt", 300, 20000),
-	}, nil, DefaultPrefs(), 1)
+	}, DefaultPrefs(), 1)
 	if len(b.Options) != 1 {
 		t.Errorf("options = %d, want 1 after limit", len(b.Options))
 	}

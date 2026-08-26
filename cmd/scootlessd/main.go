@@ -21,7 +21,6 @@ import (
 	"github.com/deviationist/scootless/internal/notify"
 	"github.com/deviationist/scootless/internal/poll"
 	"github.com/deviationist/scootless/internal/store"
-	"github.com/deviationist/scootless/internal/transit"
 )
 
 // homeFenceID is the fence built from configuration. Once the app can supply a
@@ -121,7 +120,6 @@ func run() error {
 			Addr: cfg.HTTPAddr,
 			Handler: (&api.Server{
 				Store: st, Client: client, Log: log, Token: cfg.APIToken,
-				Transit: transit.New(cfg.ClientName),
 			}).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
