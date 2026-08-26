@@ -481,3 +481,25 @@ func TestStatusValidatesFence(t *testing.T) {
 		t.Errorf("bad operator: code = %d, want 400", w.Code)
 	}
 }
+
+// A browser EventSource cannot set headers, so the token is accepted as a
+// query parameter as a fallback.
+func TestTokenAcceptedAsQueryParam(t *testing.T) {
+	s, _, _ := newServer(t)
+	s.Token = "sekret"
+
+	if w := do(t, s, "GET", "/api/v1/fences?token=sekret", ""); w.Code != 200 {
+		t.Errorf("?token=valid: code = %d, want 200", w.Code)
+	}
+	if w := do(t, s, "GET", "/api/v1/fences?token=wrong", ""); w.Code != 401 {
+		t.Errorf("?token=wrong: code = %d, want 401", w.Code)
+	}
+	// header still works and takes precedence
+	r := httptest.NewRequest("GET", "/api/v1/fences?token=wrong", nil)
+	r.Header.Set("Authorization", "Bearer sekret")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Errorf("header should win over a wrong query token: code = %d", w.Code)
+	}
+}
