@@ -430,3 +430,34 @@ func TestDarkOperatorsForgetsStaleHistory(t *testing.T) {
 		t.Errorf("dark = %v, want none once the history is stale", dark)
 	}
 }
+
+func TestCancelArmedBulk(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	testFence(t, s)
+	now := time.Unix(1787652000, 0).UTC()
+	mk := func(id, dev string) {
+		w := newWatch(id, now.Add(time.Hour))
+		w.Device = dev
+		if err := s.CreateWatch(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a", "phone")
+	mk("b", "phone")
+	mk("c", "tablet")
+
+	// cancel just phone's
+	n, err := s.CancelArmed(ctx, "phone", now)
+	if err != nil || n != 2 {
+		t.Fatalf("CancelArmed(phone) = %d, %v; want 2", n, err)
+	}
+	if got, _ := s.Watch(ctx, "c"); got.State != StateArmed {
+		t.Errorf("tablet watch was cancelled too")
+	}
+	// cancel everything remaining
+	n, _ = s.CancelArmed(ctx, "", now)
+	if n != 1 {
+		t.Errorf("CancelArmed(all) = %d, want 1", n)
+	}
+}

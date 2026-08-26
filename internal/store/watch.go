@@ -246,3 +246,29 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+// CancelArmed cancels every armed watch, optionally limited to one device.
+// It returns how many were cancelled — this is the "stop it" action, which
+// should not require the caller to have kept a watch id around.
+func (s *Store) CancelArmed(ctx context.Context, device string, now time.Time) (int, error) {
+	var (
+		res interface {
+			RowsAffected() (int64, error)
+		}
+		err error
+	)
+	if device == "" {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE watch SET state = ? WHERE state = ?`,
+			string(StateCancelled), string(StateArmed))
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE watch SET state = ? WHERE state = ? AND device = ?`,
+			string(StateCancelled), string(StateArmed), device)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}

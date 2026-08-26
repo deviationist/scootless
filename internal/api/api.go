@@ -73,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/watches", s.createWatch)
 	mux.HandleFunc("GET /api/v1/watches/{id}", s.getWatch)
 	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.cancelWatch)
+	mux.HandleFunc("DELETE /api/v1/watches", s.cancelAllWatches)
 	mux.HandleFunc("GET /api/v1/watches/{id}/events", s.watchEvents)
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/board", s.board)
@@ -354,6 +355,18 @@ func (s *Server) cancelWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancelAllWatches stops every armed watch (optionally for one device) in a
+// single call, so "stop it" needs no watch id.
+func (s *Server) cancelAllWatches(w http.ResponseWriter, r *http.Request) {
+	device := r.URL.Query().Get("device")
+	n, err := s.Store.CancelArmed(r.Context(), device, s.now())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": n})
 }
 
 func (s *Server) watchEvents(w http.ResponseWriter, r *http.Request) {
