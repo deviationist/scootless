@@ -54,15 +54,21 @@ func DefaultPrefs() Prefs {
 
 // Option is one scooter, scored.
 type Option struct {
-	Operator    string   `json:"operator"`
-	OperatorKey string   `json:"operator_key"`
-	Number      string   `json:"number"`
-	DistanceM   int      `json:"distance_m"`
-	Bearing     string   `json:"bearing"`
-	RangeKM     float64  `json:"range_km"`
-	BatteryPct  *float64 `json:"battery_pct"`
-	AppLink     string   `json:"app_link,omitempty"`
-	Score       float64  `json:"score"`
+	Operator    string `json:"operator"`
+	OperatorKey string `json:"operator_key"`
+	Number      string `json:"number"`
+	DistanceM   int    `json:"distance_m"`
+
+	// Bearing is the eight-point letter; BearingDeg is the exact angle it was
+	// reduced from, clockwise from north. Both are sent because a display may
+	// want to point precisely while still naming a direction a person can use,
+	// and deriving the letter from the angle keeps the two from disagreeing.
+	Bearing    string   `json:"bearing"`
+	BearingDeg float64  `json:"bearing_deg"`
+	RangeKM    float64  `json:"range_km"`
+	BatteryPct *float64 `json:"battery_pct"`
+	AppLink    string   `json:"app_link,omitempty"`
+	Score      float64  `json:"score"`
 }
 
 // OperatorSummary is the at-a-glance count and best pick per operator.
@@ -135,6 +141,7 @@ func Assemble(vehicles []entur.Vehicle, prefs Prefs, limit int) Board {
 			Number:      number(v.ID),
 			DistanceM:   d,
 			Bearing:     v.Compass(),
+			BearingDeg:  round1(v.BearingDeg),
 			RangeKM:     round1(rk),
 			BatteryPct:  v.FuelPct,
 			AppLink:     v.AppLinkIOS,

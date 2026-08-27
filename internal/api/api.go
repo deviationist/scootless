@@ -532,7 +532,7 @@ func vehiclesOf(vs []entur.Vehicle) []map[string]any {
 	for _, v := range vs {
 		out = append(out, map[string]any{
 			"id": v.ID, "operator": v.Operator, "operator_key": v.OperatorKey,
-			"distance_m": int(v.DistanceM + 0.5), "bearing": v.Compass(),
+			"distance_m": int(v.DistanceM + 0.5), "bearing": v.Compass(), "bearing_deg": math.Round(v.BearingDeg*10) / 10,
 			"range_km": float64(v.RangeM) / 1000, "battery_pct": v.FuelPct,
 			"app_link": v.AppLinkIOS,
 		})
