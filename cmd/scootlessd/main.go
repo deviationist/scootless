@@ -106,11 +106,16 @@ func run() error {
 		Log:      log,
 	}
 
+	// Notifications are delivered off the tick, so anything that exits after
+	// ticking has to wait for them or the process can end mid-delivery.
+	defer p.Wait()
+
 	if *once {
 		rep, err := p.Tick(ctx, time.Now())
 		if err != nil {
 			return err
 		}
+		p.Wait()
 		logTick(log, rep)
 		return nil
 	}
@@ -121,7 +126,7 @@ func run() error {
 			Handler: (&api.Server{
 				Store: st, Client: client, Log: log, Token: cfg.APIToken,
 				AllowedOrigins: cfg.AllowedOrigins,
-				DefaultAt: cfg.Home, HasDefault: cfg.HasHome,
+				DefaultAt:      cfg.Home, HasDefault: cfg.HasHome,
 			}).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
@@ -206,13 +211,24 @@ func buildSink(ctx context.Context, cfg config.Config, log *slog.Logger) (poll.S
 }
 
 func logTick(log *slog.Logger, rep poll.Report) {
-	log.Info("tick",
+	attrs := []any{
 		"queries", rep.Queries,
 		"fences", rep.Fences,
 		"arrivals", rep.Arrivals,
 		"expired", rep.Expired,
 		"fired", len(rep.Fired),
-		"truncated", rep.Truncated)
+		"truncated", rep.Truncated,
+	}
+	// The nearest probes are the other half of a tick's upstream cost, so they
+	// belong in the line that reports it - otherwise a tick looks like one
+	// request when it was five.
+	if rep.NearestQueries > 0 {
+		attrs = append(attrs, "nearest_queries", rep.NearestQueries)
+	}
+	if len(rep.Dark) > 0 {
+		attrs = append(attrs, "dark", rep.Dark)
+	}
+	log.Info("tick", attrs...)
 }
 
 func operatorLabel(keys []string) string {

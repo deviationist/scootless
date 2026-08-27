@@ -3,6 +3,7 @@ package poll
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,17 +17,30 @@ var home = geo.Point{Lat: 59.9139, Lon: 10.7522}
 // fakeFetcher returns a scripted answer and records what was asked.
 type fakeFetcher struct {
 	vehicles  []entur.Vehicle
-	queries   []entur.Query
 	err       error
 	truncated bool
+
+	// A tick issues its queries concurrently, so recording them needs a lock.
+	mu      sync.Mutex
+	queries []entur.Query
 }
 
 func (f *fakeFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error) {
+	f.mu.Lock()
 	f.queries = append(f.queries, q)
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
 	return &entur.Result{Vehicles: f.vehicles, Returned: len(f.vehicles), Truncated: f.truncated}, nil
+}
+
+// recorded returns the queries this fetcher was asked, safe to read after a
+// tick has returned.
+func (f *fakeFetcher) recorded() []entur.Query {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]entur.Query(nil), f.queries...)
 }
 
 // near returns a point roughly metres north of home.
@@ -45,7 +59,19 @@ type harness struct {
 	p     *Poller
 	fetch *fakeFetcher
 	st    *store.Store
-	sent  []Notification
+
+	mu   sync.Mutex
+	sent []Notification
+}
+
+// notifications returns what the sink received, after waiting for any delivery
+// still in flight. Deliveries run outside the tick now, so a test that read the
+// slice straight after Tick would be racing the goroutine that fills it.
+func (h *harness) notifications() []Notification {
+	h.p.Wait()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]Notification(nil), h.sent...)
 }
 
 func newHarness(t *testing.T) *harness {
@@ -61,6 +87,8 @@ func newHarness(t *testing.T) *harness {
 		Client: h.fetch,
 		Store:  st,
 		Sink: SinkFunc(func(ctx context.Context, n Notification) error {
+			h.mu.Lock()
+			defer h.mu.Unlock()
 			h.sent = append(h.sent, n)
 			return nil
 		}),
@@ -104,8 +132,8 @@ func TestAppearanceWatchIgnoresTheBaseline(t *testing.T) {
 	if len(rep.Fired) != 0 {
 		t.Errorf("fired %v on a baseline vehicle; a watch armed when one is already there must not fire instantly", rep.Fired)
 	}
-	if len(h.sent) != 0 {
-		t.Errorf("notified %d times, want 0", len(h.sent))
+	if got := h.notifications(); len(got) != 0 {
+		t.Errorf("notified %d times, want 0", len(got))
 	}
 }
 
@@ -132,11 +160,12 @@ func TestAppearanceWatchFiresOnceOnANewVehicle(t *testing.T) {
 	if len(rep.Fired) != 1 || rep.Fired[0] != "w1" {
 		t.Fatalf("Fired = %v, want [w1]", rep.Fired)
 	}
-	if len(h.sent) != 1 {
-		t.Fatalf("notified %d times, want 1", len(h.sent))
+	sent := h.notifications()
+	if len(sent) != 1 {
+		t.Fatalf("notified %d times, want 1", len(sent))
 	}
-	if len(h.sent[0].Vehicles) != 1 || h.sent[0].Vehicles[0].ID != "new" {
-		t.Errorf("notification carried %+v, want the new vehicle", h.sent[0].Vehicles)
+	if len(sent[0].Vehicles) != 1 || sent[0].Vehicles[0].ID != "new" {
+		t.Errorf("notification carried %+v, want the new vehicle", sent[0].Vehicles)
 	}
 
 	// It is still there on the next tick, but the watch has disarmed.
@@ -147,8 +176,8 @@ func TestAppearanceWatchFiresOnceOnANewVehicle(t *testing.T) {
 	if len(rep.Fired) != 0 {
 		t.Errorf("fired again after disarming: %v", rep.Fired)
 	}
-	if len(h.sent) != 1 {
-		t.Errorf("notified %d times total, want 1", len(h.sent))
+	if got := h.notifications(); len(got) != 1 {
+		t.Errorf("notified %d times total, want 1", len(got))
 	}
 }
 
@@ -335,7 +364,7 @@ func TestDistantFencesGetTheirOwnQueries(t *testing.T) {
 	}
 	// The cap governs coalesced fence queries. Nearest probes are single
 	// -operator and deliberately wide, but return only a handful of rows.
-	for _, q := range h.fetch.queries {
+	for _, q := range h.fetch.recorded() {
 		if len(q.OperatorKeys) == 1 {
 			continue
 		}
@@ -403,16 +432,32 @@ func TestTickWithNoFencesDoesNothing(t *testing.T) {
 type operatorFetcher struct {
 	inFence []entur.Vehicle
 	beyond  map[string][]entur.Vehicle
-	probes  []entur.Query
+	err     error
+
+	// The per-operator probes of one tick run concurrently.
+	mu     sync.Mutex
+	probes []entur.Query
 }
 
 func (f *operatorFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Result, error) {
 	if len(q.OperatorKeys) == 1 {
+		f.mu.Lock()
 		f.probes = append(f.probes, q)
+		f.mu.Unlock()
+		if f.err != nil {
+			return nil, f.err
+		}
 		vs := f.beyond[q.OperatorKeys[0]]
 		return &entur.Result{Vehicles: vs, Returned: len(vs)}, nil
 	}
 	return &entur.Result{Vehicles: f.inFence, Returned: len(f.inFence)}, nil
+}
+
+// probed returns the per-operator probes issued so far.
+func (f *operatorFetcher) probed() []entur.Query {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]entur.Query(nil), f.probes...)
 }
 
 func newNearestHarness(t *testing.T) (*Poller, *operatorFetcher, *store.Store) {
@@ -458,7 +503,7 @@ func TestNearestInFenceCostsNoExtraQuery(t *testing.T) {
 		t.Errorf("distance = %d m, want ~40", *n.DistanceM)
 	}
 	// Bolt was present, so no probe should have been spent on it.
-	for _, q := range f.probes {
+	for _, q := range f.probed() {
 		if q.OperatorKeys[0] == "bolt" {
 			t.Error("probed for an operator that was already in the fence")
 		}
@@ -517,20 +562,20 @@ func TestNearestLookupIsRateLimited(t *testing.T) {
 	if _, err := p.Tick(ctx, t0); err != nil {
 		t.Fatal(err)
 	}
-	first := len(f.probes)
+	first := len(f.probed())
 	if first == 0 {
 		t.Fatal("no probes on the first tick")
 	}
 	if _, err := p.Tick(ctx, t0.Add(20*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.probes) != first {
-		t.Errorf("probed again after 20s: %d -> %d", first, len(f.probes))
+	if len(f.probed()) != first {
+		t.Errorf("probed again after 20s: %d -> %d", first, len(f.probed()))
 	}
 	if _, err := p.Tick(ctx, t0.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.probes) == first {
+	if len(f.probed()) == first {
 		t.Error("did not probe again after the interval elapsed")
 	}
 }
@@ -543,8 +588,8 @@ func TestNearestCanBeDisabled(t *testing.T) {
 	if _, err := p.Tick(ctx, t0); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.probes) != 0 {
-		t.Errorf("probed %d times despite being disabled", len(f.probes))
+	if len(f.probed()) != 0 {
+		t.Errorf("probed %d times despite being disabled", len(f.probed()))
 	}
 }
 
@@ -557,10 +602,10 @@ func TestNearestProbeAsksForAMargin(t *testing.T) {
 	if _, err := p.Tick(ctx, t0); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.probes) == 0 {
+	if len(f.probed()) == 0 {
 		t.Fatal("no probes made")
 	}
-	for _, q := range f.probes {
+	for _, q := range f.probed() {
 		if q.Limit <= 1 {
 			t.Errorf("probe Limit = %d, want a margin above 1", q.Limit)
 		}
@@ -650,7 +695,7 @@ func (f *darkFetcher) Vehicles(ctx context.Context, q entur.Query) (*entur.Resul
 
 // newDarkHarness builds a world where voi was publishing an hour ago and has
 // since gone silent, while bolt is healthy.
-func newDarkHarness(t *testing.T) (*Poller, *store.Store, *[]Notification) {
+func newDarkHarness(t *testing.T) (*Poller, *store.Store, *recorder) {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -666,7 +711,7 @@ func newDarkHarness(t *testing.T) (*Poller, *store.Store, *[]Notification) {
 		store.Nearest{Operator: "voi", At: t0.Add(-time.Hour), DistanceM: &d}); err != nil {
 		t.Fatal(err)
 	}
-	sent := &[]Notification{}
+	sent := &recorder{}
 	p := &Poller{
 		Client: &darkFetcher{beyond: map[string][]entur.Vehicle{
 			// bolt is alive, 900 m away; voi returns nothing at all.
@@ -674,11 +719,35 @@ func newDarkHarness(t *testing.T) (*Poller, *store.Store, *[]Notification) {
 		}},
 		Store: st,
 		Sink: SinkFunc(func(ctx context.Context, n Notification) error {
-			*sent = append(*sent, n)
+			sent.add(n)
 			return nil
 		}),
 	}
+	sent.p = p
 	return p, st, sent
+}
+
+// recorder collects delivered notifications. Delivery happens off the tick, so
+// reading what arrived means waiting for it first.
+type recorder struct {
+	p  *Poller
+	mu sync.Mutex
+	ns []Notification
+}
+
+func (r *recorder) add(n Notification) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ns = append(r.ns, n)
+}
+
+func (r *recorder) all() []Notification {
+	if r.p != nil {
+		r.p.Wait()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Notification(nil), r.ns...)
 }
 
 func scarcityWatch(id string, ops []string) *store.Watch {
@@ -707,7 +776,7 @@ func TestScarcityWatchIsHeldBackWhenTheOperatorFeedIsDark(t *testing.T) {
 	if len(rep.Fired) != 0 {
 		t.Errorf("scarcity watch fired on a dark feed: %v", rep.Fired)
 	}
-	if len(*sent) != 0 {
+	if got := sent.all(); len(got) != 0 {
 		t.Errorf("notified on a dark feed")
 	}
 }

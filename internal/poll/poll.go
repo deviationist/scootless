@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/deviationist/scootless/internal/entur"
@@ -98,6 +99,9 @@ type Poller struct {
 	// nearestAt remembers, per fence, when the wider lookup last ran.
 	nearestAt map[string]time.Time
 
+	// wg tracks notification deliveries running outside the tick.
+	wg sync.WaitGroup
+
 	// Now is overridable so tests can drive time.
 	Now func() time.Time
 }
@@ -177,14 +181,35 @@ func (p *Poller) Tick(ctx context.Context, now time.Time) (Report, error) {
 	groups := groupFences(fences)
 	rep.Queries = len(groups)
 
-	for _, g := range groups {
-		// Query every operator and impose no range floor: one query then
-		// serves every watch on these fences, whatever each one asks for.
-		res, err := p.Client.Vehicles(ctx, entur.Query{
-			At: g.At, RadiusM: g.RadiusM,
-		})
+	// Fetch every group at once. The queries are independent and each costs a
+	// round trip, so running them in sequence made a tick's length grow with
+	// the number of fences - and every fence after the first learned about its
+	// scooters that much later than the one before it.
+	results := make([]*entur.Result, len(groups))
+	fetchErrs := make([]error, len(groups))
+	var wg sync.WaitGroup
+	for i, g := range groups {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], fetchErrs[i] = p.Client.Vehicles(ctx, entur.Query{
+				At: g.At, RadiusM: g.RadiusM,
+			})
+		}()
+	}
+	wg.Wait()
+
+	// Groups are then processed in order, so a tick's stored history and its
+	// report do not depend on which query happened to return first.
+	var failed []error
+	for i, g := range groups {
+		res, err := results[i], fetchErrs[i]
 		if err != nil {
-			return rep, fmt.Errorf("querying upstream: %w", err)
+			// One group failing must not cost the others their tick. Each
+			// group is a different set of fences, and a watch on a fence that
+			// was fetched perfectly well should still be evaluated.
+			failed = append(failed, fmt.Errorf("querying upstream: %w", err))
+			continue
 		}
 		if res.Truncated {
 			rep.Truncated = true
@@ -221,6 +246,11 @@ func (p *Poller) Tick(ctx context.Context, now time.Time) (Report, error) {
 				}
 			}
 		}
+	}
+	if len(failed) > 0 {
+		// Report the failure, but only after every healthy group has been
+		// recorded and its watches evaluated.
+		return rep, errors.Join(failed...)
 	}
 	return rep, nil
 }
@@ -321,15 +351,49 @@ func (p *Poller) evaluate(ctx context.Context, w *store.Watch, f store.Fence,
 	if err := p.Store.RecordEvent(ctx, w.ID, now, payload); err != nil {
 		return false, fmt.Errorf("recording event: %w", err)
 	}
-	if p.Sink != nil {
-		if err := p.Sink.Publish(ctx, n); err != nil {
-			// The watch has already fired and been recorded. A failed delivery
-			// must not un-fire it, so this is logged and not returned.
-			p.log().Error("publishing notification", "watch", w.ID, "err", err)
-		}
-	}
+	p.dispatch(ctx, n)
 	return true, nil
 }
+
+// DeliveryTimeout bounds one notification delivery. It is generous because a
+// late notification still has value, and short enough that a wedged sink
+// cannot accumulate goroutines forever.
+const DeliveryTimeout = 30 * time.Second
+
+// dispatch delivers a fired notification without making the tick wait for it.
+//
+// The watch has already fired, been recorded, and been disarmed by the time we
+// get here, so delivery is no longer part of deciding anything - but it is a
+// network round trip, and previously it happened inline. Two watches firing on
+// the same tick meant the second one's evaluation queued behind the first
+// one's MQTT ack and ntfy POST, and every fence after them waited too. The
+// slowest possible sink now costs the tick nothing.
+//
+// The delivery deliberately does not inherit the tick's context. A tick's
+// context is cancelled when the tick ends; a notification cancelled at that
+// moment is one the phone never gets, which is the single failure this whole
+// program exists to avoid.
+func (p *Poller) dispatch(ctx context.Context, n Notification) {
+	if p.Sink == nil {
+		return
+	}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DeliveryTimeout)
+		defer cancel()
+		if err := p.Sink.Publish(dctx, n); err != nil {
+			// The watch has already fired and been recorded. A failed delivery
+			// must not un-fire it, so this is logged and not returned.
+			p.log().Error("publishing notification", "watch", n.WatchID, "err", err)
+		}
+	}()
+}
+
+// Wait blocks until every in-flight notification delivery has finished. A
+// caller that exits after a single tick - the -once mode, and the tests - must
+// call it, or the process can end mid-POST.
+func (p *Poller) Wait() { p.wg.Wait() }
 
 // matches narrows a fence's vehicles to those a given watch cares about.
 func matches(vehicles []entur.Vehicle, w *store.Watch) []entur.Vehicle {
@@ -475,27 +539,51 @@ func (p *Poller) recordNearest(ctx context.Context, f store.Fence, now time.Time
 	if reach <= 0 {
 		reach = DefaultReachM
 	}
+	// The absent operators are probed concurrently. These are up to four
+	// independent round trips on the same tick as the query the watches
+	// actually depend on; in sequence they pushed every later fence's work
+	// back by the sum of them, for an answer that is only context.
+	var (
+		absent  []entur.Operator
+		probes  []*entur.Result
+		perrs   []error
+		probeWG sync.WaitGroup
+	)
 	for _, o := range entur.Operators() {
 		if _, present := closest[o.Key]; present {
 			continue
 		}
-		// Not Limit: 1. The upstream selects the nearest N before we filter
-		// out the ones that cannot be rented, so asking for exactly one and
-		// having it turn out to be disabled would read as "none within 5 km".
-		// A small margin makes that impossible in practice.
-		res, err := p.Client.Vehicles(ctx, entur.Query{
-			At: f.At, RadiusM: reach, OperatorKeys: []string{o.Key},
-			Limit: nearestProbeCount,
-		})
+		absent = append(absent, o)
+	}
+	probes = make([]*entur.Result, len(absent))
+	perrs = make([]error, len(absent))
+	for i, o := range absent {
+		probeWG.Add(1)
+		go func() {
+			defer probeWG.Done()
+			// Not Limit: 1. The upstream selects the nearest N before we
+			// filter out the ones that cannot be rented, so asking for
+			// exactly one and having it turn out to be disabled would read as
+			// "none within 5 km". A small margin makes that impossible in
+			// practice.
+			probes[i], perrs[i] = p.Client.Vehicles(ctx, entur.Query{
+				At: f.At, RadiusM: reach, OperatorKeys: []string{o.Key},
+				Limit: nearestProbeCount,
+			})
+		}()
+	}
+	probeWG.Wait()
+
+	for i, o := range absent {
 		rep.NearestQueries++
-		if err != nil {
+		if perrs[i] != nil {
 			// One operator's nearest is context, not the product. Losing it
 			// must not fail the tick that the watches depend on.
-			p.log().Warn("nearest lookup failed", "operator", o.Key, "err", err)
+			p.log().Warn("nearest lookup failed", "operator", o.Key, "err", perrs[i])
 			continue
 		}
 		n := store.Nearest{Operator: o.Key, At: now}
-		if best, ok := nearestOf(res.Vehicles, f); ok {
+		if best, ok := nearestOf(probes[i].Vehicles, f); ok {
 			d := int(geo.DistanceM(f.At, best.At) + 0.5)
 			n.DistanceM, n.VehicleID = &d, best.ID
 		}
