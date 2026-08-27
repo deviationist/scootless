@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/deviationist/scootless/internal/geo"
@@ -28,9 +29,35 @@ func New(clientName string) *Client {
 	return &Client{
 		Endpoint:   DefaultEndpoint,
 		ClientName: clientName,
-		HTTP:       &http.Client{Timeout: 25 * time.Second},
+		HTTP:       &http.Client{Timeout: DefaultTimeout, Transport: sharedTransport()},
 	}
 }
+
+// DefaultTimeout bounds one upstream request.
+//
+// It is deliberately shorter than the poll interval. A request that outlives
+// its own tick is worse than no request: it holds a slot while the next tick
+// starts, and whatever it eventually returns describes a feed state that has
+// already been superseded. Failing fast and waiting for the next tick is the
+// cheaper answer.
+const DefaultTimeout = 8 * time.Second
+
+// sharedTransport is pooled across every client because the daemon talks to
+// exactly one host and now does so concurrently.
+//
+// The stdlib default keeps two idle connections per host, which for a parallel
+// tick means most requests open a fresh connection and pay the TLS handshake -
+// measured at ~35 ms against Entur, on a request whose total is ~230 ms. Keep
+// enough idle connections to serve a whole tick's fan-out from the pool.
+var sharedTransport = sync.OnceValue(func() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 32
+	t.MaxIdleConnsPerHost = 32
+	t.MaxConnsPerHost = 32
+	t.IdleConnTimeout = 5 * time.Minute
+	t.ForceAttemptHTTP2 = true
+	return t
+})
 
 // Query describes one question about one place.
 type Query struct {
@@ -310,7 +337,7 @@ func (c *Client) clientName() string {
 
 func (c *Client) http() *http.Client {
 	if c.HTTP == nil {
-		return &http.Client{Timeout: 25 * time.Second}
+		return &http.Client{Timeout: DefaultTimeout, Transport: sharedTransport()}
 	}
 	return c.HTTP
 }
