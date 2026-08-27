@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/deviationist/scootless/internal/poll"
@@ -140,18 +141,34 @@ func (n *Ntfy) client() *http.Client {
 // still buzz, and vice versa. Errors are collected rather than short-circuited.
 type Multi []poll.Sink
 
-// Publish sends to every sink, returning whatever failed.
+// Publish sends to every sink at once, returning whatever failed.
+//
+// The sinks are independent destinations - a broker, an ntfy server, the log -
+// and each is a round trip. Delivering to them in sequence made the phone wait
+// out the broker's QoS-1 acknowledgement first, so the total was the sum of
+// every sink rather than the slowest one.
 func (m Multi) Publish(ctx context.Context, n poll.Notification) error {
-	var errs []error
-	for _, s := range m {
+	errs := make([]error, len(m))
+	var wg sync.WaitGroup
+	for i, s := range m {
 		if s == nil {
 			continue
 		}
-		if err := s.Publish(ctx, n); err != nil {
-			errs = append(errs, err)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Publish(ctx, n)
+		}()
+	}
+	wg.Wait()
+
+	var failed []error
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err)
 		}
 	}
-	return joinErrors(errs)
+	return joinErrors(failed)
 }
 
 // joinErrors combines sink failures without hiding any of them.

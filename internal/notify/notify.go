@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -88,8 +87,6 @@ type MQTT struct {
 	client Publisher
 	prefix string
 	log    *slog.Logger
-
-	mu sync.Mutex
 }
 
 // Options configures the MQTT sink.
@@ -165,10 +162,13 @@ func (m *MQTT) Sample(ctx context.Context, fenceID string, counts map[string]int
 	return m.publish(ctx, fmt.Sprintf("%s/fence/%s/sample", m.prefix, fenceID), body)
 }
 
+// publish sends one message and waits for its acknowledgement.
+//
+// There is deliberately no lock around this. paho documents its Client as
+// "safe for concurrent use by multiple goroutines" (client.go:62), so the only
+// thing a mutex here bought was making two notifications that fired on the
+// same tick wait for each other's QoS-1 acknowledgement in turn.
 func (m *MQTT) publish(ctx context.Context, topic string, body []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	// QoS 1: a missed "your scooter is here" is the one message that must not
 	// be dropped, and a duplicate is merely mildly annoying. Not retained -
 	// this notification is worthless to a subscriber that connects later.
