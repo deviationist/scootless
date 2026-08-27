@@ -21,13 +21,29 @@ import (
 // DefaultInterval is how often to poll.
 //
 // Chosen from measurement, not from the operators' stated ttl. Sampling the
-// three Oslo feeds showed Ryde advancing every 27-33 s (mean 30, jittery
-// rather than the exact 30 s steps a coarser earlier sample suggested), Voi
-// irregular at 31-58 s, and Bolt only every ~5 minutes. There is no shared
-// clock to lock onto, so a fixed interval a little under the fastest operator's
-// cadence is the honest choice: it catches Ryde's ticks without aliasing, and
-// for the slower operators the upstream cadence dominates the latency anyway.
-const DefaultInterval = 20 * time.Second
+// Oslo feeds showed Ryde advancing every 26-32 s, Voi irregular at 26-58 s,
+// and Bolt in bursts rather than on the ~5 minute cadence an earlier, coarser
+// sample suggested. There is no shared clock to lock onto.
+//
+// The number that actually sets notification latency is not any one operator's
+// cadence but how often *something* changes, because a watch is usually
+// waiting for whichever scooter turns up first. Sampling all operators at 2 s
+// for 200 s, the gap between consecutive changes was 4, 26, 28, 4, 32, 22, 2,
+// 2, 28, 6 seconds - a mean of about 15. Against that, a 20 s interval was
+// undersampling: it added a uniform 0-20 s delay, 10 s on average, to every
+// notification, on top of whatever the feed itself cost.
+//
+// Halving it halves that term. 10 s costs one extra request per 10 s against a
+// service that answered ~230 ms consistently under a 0.5 req/s probe with no
+// throttling, and still samples a little faster than the feed changes. Going
+// further is allowed - SCOOTLESS_INTERVAL has a 5 s floor - but 5 s samples
+// roughly three times faster than the data changes, and buys 2.5 s.
+const DefaultInterval = 10 * time.Second
+
+// MinInterval is the floor on a configured interval. Below this the poller is
+// sampling several times faster than the feed changes, which costs a free
+// public dataset real requests to buy fractions of a second.
+const MinInterval = 5 * time.Second
 
 // MaxQueryRadiusM caps how wide a coalesced query may grow. Beyond this, one
 // query per fence costs less than over-fetching a whole city.

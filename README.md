@@ -279,25 +279,41 @@ Bolt  ~312s
 
 Ryde is unimodal around 30 s. Voi is **bimodal**, not noisy: it runs on the same
 30 s grid but publishes only about every third tick, for an effective ~50 s.
-Bolt moves roughly every five minutes, despite advertising a `ttl` of 300 that
-would suggest the same thing far more precisely than it delivers.
+Bolt is the slowest and the least regular. An early sample put it at "roughly
+every five minutes"; re-measured at 2 s resolution it was burstier than that —
+gaps of 54 s, then three changes inside 4 s — so treat it as *slow and uneven*
+rather than as a clean 300 s tick, and do not build a floor on the five-minute
+figure.
 
 Three things follow. **Each operator runs on its own phase**, so there is no
 single clock to synchronise a poller to — and the GraphQL endpoint exposes no
 timestamp of its own to read one from, only the per-city GBFS feeds do.
 **`ttl` is not the update interval**; Ryde advertises 5 s and moves every 30.
-And **an appearance alert on Bolt can never be responsive**, because the data
-underneath it is five minutes old at worst. That is a property of the feed, not
-of any tool built on it.
+And **Bolt is the least responsive of the three**, so an appearance alert on it
+lags the others. That is a property of the feed, not of any tool built on it.
 
-Polling every ~20 s catches every Ryde tick without aliasing. Faster than that
-gains nothing at all.
+**The number that sets notification latency is not any one operator's cadence.**
+It is how often *something* changes, because a watch is usually waiting for
+whichever scooter turns up first. Sampling all operators together at 2 s for
+200 s, the gaps between consecutive changes were 4, 26, 28, 4, 32, 22, 2, 2, 28
+and 6 seconds — a mean of about **15 s**.
+
+A fixed interval adds a uniform 0-to-interval delay on top of that, half of it
+on average. So the old 20 s interval was undersampling a feed that was already
+moving, and cost every notification about 10 s for nothing. **The default is now
+10 s**, which is a little faster than the feed changes and halves that term. The
+floor is 5 s; below it you are asking a free public dataset several times per
+change it makes, to buy 2.5 s.
 
 ## Courtesy
 
 This reads a public, openly licensed dataset published for exactly this kind of
-use. Identify yourself with `ET-Client-Name`, and don't poll faster than the
-~20 s below which there is simply nothing new to read.
+use. Identify yourself with `ET-Client-Name`, and keep the interval at or above
+the 5 s floor — the feed changes about every 15 s, so polling several times per
+change costs the service real requests to buy you fractions of a second.
+
+One tick is **one** upstream request however many fences you watch: overlapping
+fences are coalesced into a single query and filtered locally.
 
 Not affiliated with Ryde, Voi, Bolt, Dott or Entur.
 

@@ -21,6 +21,7 @@ import (
 	"github.com/deviationist/scootless/internal/board"
 	"github.com/deviationist/scootless/internal/entur"
 	"github.com/deviationist/scootless/internal/geo"
+	"github.com/deviationist/scootless/internal/poll"
 	"github.com/deviationist/scootless/internal/store"
 )
 
@@ -872,11 +873,30 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// streamInterval turns the requested interval in seconds into the cadence the
+// stream will actually use.
+//
+// It shares the poller's floor because it is the same politeness budget against
+// the same upstream: each SSE connection fetches independently, so a dashboard
+// asking for one second would be one request per second per viewer.
+func streamInterval(seconds int) time.Duration {
+	d := time.Duration(seconds) * time.Second
+	if d < poll.MinInterval {
+		return poll.MinInterval
+	}
+	return d
+}
+
 // boardStream pushes a fresh board to the dashboard over Server-Sent Events, so
 // the pad opens one connection and receives updates instead of polling.
 //
-// The refresh cadence defaults to 30 s because that is how often the upstream
-// feed actually changes — streaming faster would re-send an identical board.
+// The refresh cadence defaults to the poller's own interval. It used to default
+// to 30 s on the grounds that the feed does not change faster, which measurement
+// did not support: sampling every operator at 2 s, the gap between consecutive
+// changes averaged about 15 s. A 30 s stream was therefore showing a board that
+// was up to 30 s stale, and the dashboard's staleness is added to the daemon's,
+// not hidden by it.
+//
 // Each connection fetches independently; for a handful of dashboards that is a
 // few upstream calls per cycle, which is courteous. A shared broadcaster would
 // be the move only if this ever fans out to many clients.
@@ -886,14 +906,13 @@ func (s *Server) boardStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	interval, err := intParam(r.URL.Query(), "interval", 30)
+	secs, err := intParam(r.URL.Query(), "interval",
+		int(poll.DefaultInterval/time.Second))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if interval < 10 {
-		interval = 10 // the feed does not change faster; be courteous
-	}
+	interval := streamInterval(secs)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
@@ -922,7 +941,7 @@ func (s *Server) boardStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send() // immediate first board so the dashboard renders at once
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

@@ -23,6 +23,7 @@ import (
 	"github.com/deviationist/scootless/internal/config"
 	"github.com/deviationist/scootless/internal/entur"
 	"github.com/deviationist/scootless/internal/geo"
+	"github.com/deviationist/scootless/internal/poll"
 )
 
 func main() {
@@ -44,7 +45,7 @@ type state struct {
 func run() error {
 	var (
 		dir     = flag.String("config", ".", "directory to read .env from")
-		every   = flag.Duration("every", 20*time.Second, "how often to look")
+		every   = flag.Duration("every", poll.DefaultInterval, "how often to look")
 		until   = flag.Duration("for", 2*time.Hour, "give up after this long")
 		jsonOut = flag.Bool("json", false, "emit one JSON object per event")
 	)

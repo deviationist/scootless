@@ -60,7 +60,7 @@ Phone: proxy `192.168.3.9:9080`, mitm CA already trusted from last time.
   | tee ~/.local/state/scootless/ride-entur-$(date +%H%M).ndjson
 ```
 
-Use a 10 s interval here, not 20 s, because the unlock and reappear transitions
+Use a 10 s interval here — now the default — because the unlock and reappear transitions
 are what matter and they need tighter resolution than the standing count does.
 
 ## Protocol

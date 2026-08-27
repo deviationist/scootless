@@ -27,25 +27,71 @@ showed that claim does not hold, and the idea does not survive it:
 
 | Operator | advertised `ttl` | measured step |
 |---|---|---|
-| Ryde | 5 s | 29–33 s, mean 30 |
-| Voi | 30 s | irregular, 30–62 s |
-| Bolt | 300 s | ~317 s |
+| Ryde | 5 s | 26–33 s, mean 30 |
+| Voi | 30 s | irregular, 26–58 s |
+| Bolt | 300 s | slow and uneven — see below |
 
 Three findings follow. Each operator ticks on **its own phase**, so there is no
 single clock to lock onto. Ryde **jitters** either side of 30 s rather than
-stepping exactly, so even a per-operator lock would drift. And **Bolt updates
-roughly every five minutes**, which puts a floor on notification latency for
-that operator that no polling strategy can lower.
+stepping exactly, so even a per-operator lock would drift. And **Bolt is the
+slowest**, so an appearance watch on it lags one on Ryde.
 
-The honest replacement is a fixed interval a little under the fastest
-operator's cadence — 20 s — which catches Ryde's ticks without aliasing and
-accepts that for the slower operators the upstream cadence dominates. The
-GraphQL endpoint carries no timestamp of its own, so the alternative would mean
-a second request per operator per tick to read a GBFS header, for latency that
-is bounded upstream anyway.
+Bolt's "~5 minutes" came from a coarse sample and did not survive re-measurement
+at 2 s resolution: a 54 s gap, then three changes inside 4 s. It is still the
+laggard, but 300 s is not a floor to design against.
 
-Worth stating in the product: an appearance watch on Bolt cannot be as
-responsive as one on Ryde, and that is a property of the data, not the tool.
+**The interval is set by the aggregate change rate, not by any one operator.** A
+watch is usually waiting for whichever scooter turns up first, so what matters is
+how often *something* moves. Sampling all operators at 2 s for 200 s, the gaps
+between consecutive changes were 4, 26, 28, 4, 32, 22, 2, 2, 28 and 6 seconds —
+a mean of about **15 s**.
+
+A fixed interval adds a uniform 0-to-interval delay on top of the feed's own
+staleness, half of it on average. The original 20 s was therefore *undersampling*
+a feed that was already moving, and cost roughly 10 s per notification for
+nothing. **10 s** is a little faster than the feed changes and halves that term;
+the floor is 5 s, below which we are asking a free public dataset several times
+per change it makes to buy 2.5 s.
+
+The GraphQL endpoint carries no timestamp of its own, so phase-locking would
+mean a second request per operator per tick to read a GBFS header — more load
+than simply sampling a bit faster, for a lock that Ryde's jitter would drift out
+of anyway.
+
+## What a tick costs, and what it must not cost
+
+One tick is **one** upstream request per *group* of fences, not per fence, and
+overlapping fences coalesce into a single query (see below). Measured, that
+request is ~230 ms, of which ~35 ms is the TLS handshake when the connection is
+not reused — so the client keeps a pooled transport sized for a whole tick's
+fan-out.
+
+Three rules keep a tick short, and they are about *blocking*, not about doing
+less work:
+
+**Queries fan out; results are consumed in order.** The group queries run
+concurrently, and so do the per-operator nearest probes. Results are then read
+back by index, so what gets stored does not depend on which request returned
+first. The bug this invites is a crossed wire — one group's vehicles recorded
+against another group's fences — which is why there is a test that gives each
+fence a vehicle only *it* can legally contain.
+
+**One group's failure is not the tick's failure.** Groups are independent sets of
+fences. A failed query is collected and reported once every healthy group has
+been recorded and its watches evaluated. Returning early instead means one
+unlucky fence silences every other fence's watches for that tick.
+
+**Delivery happens off the tick.** By the time a notification is dispatched the
+watch has already fired, been recorded and been disarmed, so nothing left to
+decide depends on the delivery — but it is a network round trip, and inline it
+made a second watch firing on the same tick queue behind the first one's broker
+acknowledgement. It is dispatched to its own goroutine with `context.WithoutCancel`
+and its own timeout, because a tick's context dies with the tick and a
+notification cancelled at that moment is one the phone never gets. Anything that
+exits after ticking must call `Poller.Wait`.
+
+The sinks fan out too: a broker and an ntfy server are independent destinations,
+so the total is the slowest of them rather than the sum.
 
 **Coalesce queries.** One upstream request per armed watch per tick does not
 scale and is rude to a free dataset. Group active fences: overlapping or nearby

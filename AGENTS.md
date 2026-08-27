@@ -66,10 +66,25 @@ opposite:
   vehicle. `nil` must stay distinct from zero: reporting nothing is not a flat
   battery.
 - **`isDisabled` vehicles are listed but cannot be rented.**
-- **`ttl` is not the update interval.** Measured: Ryde advances every 27-33 s
-  while advertising 5; Voi is bimodal at ~30 s or ~59 s; Bolt moves only every
-  ~5 minutes. Each operator runs on its own phase, so there is no clock to
+- **`ttl` is not the update interval.** Measured: Ryde advances every 26-33 s
+  while advertising 5; Voi is bimodal at ~30 s or ~59 s; Bolt is slow and
+  uneven. Each operator runs on its own phase, so there is no clock to
   synchronise to, and the GraphQL endpoint exposes no timestamp of its own.
+- **Bolt is not a clean 5-minute tick.** An earlier note said "~5 minutes";
+  re-measured at 2 s resolution it was burstier - a 54 s gap, then three changes
+  inside 4 s. It is still the slowest operator, but do not treat 300 s as a
+  latency floor for it.
+- **What sets notification latency is the *aggregate* change rate**, not any one
+  operator's, because a watch is usually waiting for whichever scooter turns up
+  first. Sampling all operators at 2 s for 200 s, consecutive changes were 4, 26,
+  28, 4, 32, 22, 2, 2, 28, 6 s apart - a mean of ~15 s. A fixed poll interval
+  adds a uniform 0-to-interval delay on top, half of it on average, so an
+  interval above ~15 s is undersampling a feed that is already moving. The
+  default is 10 s with a 5 s floor.
+- **The endpoint tolerates polling.** ~100 requests at a sustained 0.5 req/s saw
+  no throttling and a steady ~230 ms round trip (~35 ms of it TLS, so connection
+  reuse is worth having). This is not licence to hammer it; it is why 10 s is
+  affordable and why the floor is a courtesy rather than a rate limit.
 - **`vehicle(id:)` and `vehicles(ids:)` exist** and are not radius-filtered, so
   they escape the nearest-N selection entirely. An unknown id returns null, not
   an error. `Client.ByID` uses a zero radius to mean "no area limit"; do not
@@ -82,6 +97,21 @@ opposite:
 - **A tick must not fail because a nicety failed.** A nearest-vehicle probe or
   a notification delivery that errors is logged and skipped; the watches depend
   on the tick completing.
+- **One group failing must not cost the other groups their tick.** Group queries
+  are independent sets of fences. A failure is collected and reported after every
+  healthy group has been recorded and its watches evaluated, never by returning
+  early.
+- **A tick's queries run concurrently, but its results are processed in order.**
+  Both the group queries and the per-operator nearest probes fan out; the results
+  are then consumed by index so history and reports do not depend on which
+  request returned first. The failure mode to guard against is a crossed wire
+  putting one group's vehicles on another group's fences.
+- **Notification delivery happens off the tick, and does not inherit its
+  context.** By the time a notification is dispatched the watch has already
+  fired, been recorded and been disarmed, so nothing left to decide depends on
+  the delivery. A tick's context is cancelled when the tick ends, so delivery
+  uses `context.WithoutCancel` plus its own timeout. Anything that exits after
+  ticking - `-once`, the tests - must call `Poller.Wait`.
 - **`MarkFired` disarms in the same statement that records the fire**, so two
   overlapping ticks cannot both notify.
 - **An appearance watch fires on its baseline diff, never on a count.**

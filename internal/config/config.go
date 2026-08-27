@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/deviationist/scootless/internal/geo"
+	"github.com/deviationist/scootless/internal/poll"
 )
 
 // Prefix is the environment-variable namespace.
@@ -64,7 +65,7 @@ func Default() Config {
 		Threshold:    3,
 		ClientName:   "scootless",
 		DBPath:       defaultDBPath(),
-		Interval:     20 * time.Second,
+		Interval:     poll.DefaultInterval,
 		HTTPAddr:     "127.0.0.1:8099",
 		MQTTTopic:    "scootless",
 		MQTTClientID: "scootless",
@@ -148,11 +149,12 @@ func (c *Config) apply(v map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("%sINTERVAL: %w", Prefix, err)
 		}
-		if d < 5*time.Second {
-			// The upstream data does not change faster than this, so a
-			// shorter interval buys nothing and is discourteous to a free
-			// public dataset.
-			return fmt.Errorf("%sINTERVAL must be at least 5s", Prefix)
+		if d < poll.MinInterval {
+			// Measured, the feed changes about every 15 s across all
+			// operators. Below this we are sampling several times faster than
+			// the data moves: it buys almost nothing and is discourteous to a
+			// free public dataset.
+			return fmt.Errorf("%sINTERVAL must be at least %s", Prefix, poll.MinInterval)
 		}
 		c.Interval = d
 	}
