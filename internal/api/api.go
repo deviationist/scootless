@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/vehicles", s.vehicles)
 	mux.HandleFunc("GET /api/v1/fences", s.listFences)
 	mux.HandleFunc("POST /api/v1/fences", s.createFence)
+	mux.HandleFunc("DELETE /api/v1/fences/{id}", s.deleteFence)
 	mux.HandleFunc("GET /api/v1/watches", s.listWatches)
 	mux.HandleFunc("POST /api/v1/watches", s.createWatch)
 	mux.HandleFunc("GET /api/v1/watches/{id}", s.getWatch)
@@ -323,6 +324,39 @@ func (s *Server) baseline(ctx context.Context, f store.Fence, req createWatchReq
 		ids = append(ids, v.ID)
 	}
 	return ids, nil
+}
+
+// deleteFence removes a fence and everything recorded against it.
+//
+// It refuses with 409 while an armed watch depends on the fence, rather than
+// leaving that watch to sit armed and never fire — the poller only refreshes
+// the fences that exist, so the failure would otherwise be silent and whoever
+// was waiting would simply never be told.
+//
+// Nothing in this service creates fences it also removes; the route exists so a
+// consumer that projects its own location into a fence can take it back out
+// again. Without it every abandoned fence is queried upstream on every tick,
+// forever.
+func (s *Server) deleteFence(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "fence id required")
+		return
+	}
+	removed, err := s.Store.DeleteFence(r.Context(), id)
+	if errors.Is(err, store.ErrFenceInUse) {
+		writeErr(w, http.StatusConflict, "fence has armed watches; cancel them first")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if !removed {
+		writeErr(w, http.StatusNotFound, "unknown fence")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listWatches(w http.ResponseWriter, r *http.Request) {
