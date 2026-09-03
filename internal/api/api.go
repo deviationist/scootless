@@ -811,18 +811,45 @@ type boardRequest struct {
 
 // parseBoardRequest resolves the shared board parameters, applying the home
 // default and validating operators.
-func (s *Server) parseBoardRequest(q map[string][]string) (boardRequest, error) {
+func (s *Server) parseBoardRequest(ctx context.Context, q map[string][]string) (boardRequest, error) {
 	get := func(k string) string {
 		if v := q[k]; len(v) > 0 {
 			return v[0]
 		}
 		return ""
 	}
-	lat, lon, err := s.coordsOrDefault(get("lat"), get("lon"))
-	if err != nil {
-		return boardRequest{}, err
+
+	// A named fence may stand in for the coordinates.
+	//
+	// The point of it is that a consumer with a location of its own - a display
+	// in a household that is not the one this server was configured for - can
+	// persist that location here once, as a fence, and then reference it. The
+	// alternative is sending lat/lon on every request, which works but leaves
+	// the location owned by whichever client last sent it, and gives watches
+	// nothing stable to arm against.
+	//
+	// The fence carries its own radius, which becomes the default. An explicit
+	// radius still wins, so a caller can ask a wider question of the same place.
+	defaultRadius := 400
+	lat, lon := 0.0, 0.0
+	if id := get("fence"); id != "" {
+		f, err := s.Store.Fence(ctx, id)
+		if err != nil {
+			return boardRequest{}, fmt.Errorf("unknown fence %q", id)
+		}
+		lat, lon = f.At.Lat, f.At.Lon
+		if f.RadiusM > 0 {
+			defaultRadius = f.RadiusM
+		}
+	} else {
+		var err error
+		lat, lon, err = s.coordsOrDefault(get("lat"), get("lon"))
+		if err != nil {
+			return boardRequest{}, err
+		}
 	}
-	radius, err := intParam(q, "radius", 400)
+
+	radius, err := intParam(q, "radius", defaultRadius)
 	if err != nil {
 		return boardRequest{}, err
 	}
@@ -863,7 +890,7 @@ func (s *Server) computeBoard(ctx context.Context, br boardRequest) (map[string]
 // the best one to take, the alternatives, and a per-operator summary — the
 // leaving-the-house view for a wall display.
 func (s *Server) board(w http.ResponseWriter, r *http.Request) {
-	br, err := s.parseBoardRequest(r.URL.Query())
+	br, err := s.parseBoardRequest(r.Context(), r.URL.Query())
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -904,7 +931,7 @@ func streamInterval(seconds int) time.Duration {
 // few upstream calls per cycle, which is courteous. A shared broadcaster would
 // be the move only if this ever fans out to many clients.
 func (s *Server) boardStream(w http.ResponseWriter, r *http.Request) {
-	br, err := s.parseBoardRequest(r.URL.Query())
+	br, err := s.parseBoardRequest(r.Context(), r.URL.Query())
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
