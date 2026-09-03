@@ -535,6 +535,9 @@ func vehiclesOf(vs []entur.Vehicle) []map[string]any {
 			"distance_m": int(v.DistanceM + 0.5), "bearing": v.Compass(), "bearing_deg": math.Round(v.BearingDeg*10) / 10,
 			"range_km": float64(v.RangeM) / 1000, "battery_pct": v.FuelPct,
 			"app_link": v.AppLinkIOS,
+			// Where it actually is. Distance and bearing locate it relative to
+			// the asker; only the point itself can be drawn on a map.
+			"lat": math.Round(v.At.Lat*1e6) / 1e6, "lon": math.Round(v.At.Lon*1e6) / 1e6,
 		})
 	}
 	return out

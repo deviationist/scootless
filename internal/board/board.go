@@ -4,6 +4,7 @@
 package board
 
 import (
+	"math"
 	"sort"
 
 	"github.com/deviationist/scootless/internal/entur"
@@ -63,8 +64,19 @@ type Option struct {
 	// reduced from, clockwise from north. Both are sent because a display may
 	// want to point precisely while still naming a direction a person can use,
 	// and deriving the letter from the angle keeps the two from disagreeing.
-	Bearing    string   `json:"bearing"`
-	BearingDeg float64  `json:"bearing_deg"`
+	Bearing    string  `json:"bearing"`
+	BearingDeg float64 `json:"bearing_deg"`
+
+	// Lat and Lon are where the vehicle actually is. Distance and bearing say
+	// how far and which way from the asker, which is enough to walk to one but
+	// not enough to draw one: the letter is one of eight, so a position
+	// reconstructed from it lands anywhere in a 45-degree wedge. A consumer
+	// that wants to put a pin on a map needs the point itself.
+	//
+	// Six decimals is about 0.1 m, well inside GPS error, and keeps float noise
+	// out of the payload.
+	Lat        float64  `json:"lat"`
+	Lon        float64  `json:"lon"`
 	RangeKM    float64  `json:"range_km"`
 	BatteryPct *float64 `json:"battery_pct"`
 	AppLink    string   `json:"app_link,omitempty"`
@@ -142,6 +154,8 @@ func Assemble(vehicles []entur.Vehicle, prefs Prefs, limit int) Board {
 			DistanceM:   d,
 			Bearing:     v.Compass(),
 			BearingDeg:  round1(v.BearingDeg),
+			Lat:         round6(v.At.Lat),
+			Lon:         round6(v.At.Lon),
 			RangeKM:     round1(rk),
 			BatteryPct:  v.FuelPct,
 			AppLink:     v.AppLinkIOS,
@@ -175,6 +189,8 @@ func number(id string) string {
 	}
 	return last
 }
+
+func round6(f float64) float64 { return math.Round(f*1e6) / 1e6 }
 
 func round1(f float64) float64 {
 	return float64(int(f*10+0.5)) / 10
